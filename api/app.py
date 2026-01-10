@@ -6,6 +6,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 
 from api.routes import alerts_router, markets_router, settings_router
 from api.websocket import router as ws_router
@@ -87,6 +88,11 @@ def create_app() -> FastAPI:
     async def health_check():
         """Health check endpoint."""
         return {"status": "healthy"}
+
+    @app.get("/")
+    async def root():
+        """Redirect root to API docs."""
+        return RedirectResponse(url="/docs")
 
     return app
 
