@@ -77,15 +77,15 @@ dmypy.json
 # Database
 *.db
 *.db-journal
-data/*.db
-data/*.db-journal
 
 # Logs
 *.log
 logs/
 
-# Local data
-data/
+# Local data files (not source code)
+data/local/
+data/*.db
+data/*.db-journal
 
 # Secrets - NEVER commit these
 .env
