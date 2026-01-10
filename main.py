@@ -153,21 +153,62 @@ class PolymarketMonitor:
         await self._subscribe_to_markets()
 
     async def _subscribe_to_markets(self) -> None:
-        """Fetch and subscribe to active markets."""
+        """Fetch and subscribe to active markets with pagination."""
         try:
-            markets = await gamma_client.sync_markets(limit=50)
-            logger.info(f"Fetched {len(markets)} markets")
+            all_markets = []
+            offset = 0
+            batch_size = 100
+            max_markets = settings.max_markets or 10000  # 0 means fetch all
 
-            for market in markets:
+            while len(all_markets) < max_markets:
+                markets = await gamma_client.sync_markets(limit=batch_size)
+                if not markets:
+                    break
+
+                # Fetch with offset for next batch
+                raw_markets = await gamma_client.get_markets(
+                    limit=batch_size,
+                    offset=offset,
+                    active=True,
+                )
+                if not raw_markets:
+                    break
+
+                for m in raw_markets:
+                    if not isinstance(m, dict):
+                        continue
+                    try:
+                        market = gamma_client.parse_market(m)
+                        all_markets.append(market)
+                    except Exception:
+                        continue
+
+                logger.info(f"Fetched {len(all_markets)} markets so far...")
+
+                if len(raw_markets) < batch_size:
+                    break  # No more markets
+
+                offset += batch_size
+
+                # Respect rate limits
+                await asyncio.sleep(0.2)
+
+            logger.info(f"Fetched {len(all_markets)} total markets")
+
+            # Subscribe to all markets
+            subscribed = 0
+            for market in all_markets:
                 if market.token_id_yes:
                     await self._ws_manager.subscribe(market.token_id_yes)
+                    subscribed += 1
                 if market.token_id_no:
                     await self._ws_manager.subscribe(market.token_id_no)
+                    subscribed += 1
 
                 # Store in database
                 await db.upsert_market(market.model_dump())
 
-            logger.info(f"Subscribed to {len(markets)} markets")
+            logger.info(f"Subscribed to {subscribed} tokens from {len(all_markets)} markets")
 
         except Exception as e:
             logger.error(f"Failed to subscribe to markets: {e}")

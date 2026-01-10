@@ -71,6 +71,12 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = Field(default="INFO", description="Logging level")
 
+    # Market Settings
+    max_markets: int = Field(
+        default=500,
+        description="Maximum number of markets to monitor (0 for all)",
+    )
+
     # WebSocket Settings
     ws_reconnect_delay: float = Field(
         default=1.0,
