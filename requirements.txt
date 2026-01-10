@@ -1,0 +1,33 @@
+# Polymarket Monitor - Dependencies
+# Install with: pip install -r requirements.txt
+
+# Polymarket API
+py-clob-client>=0.1.0
+
+# Web Framework
+fastapi>=0.100.0
+uvicorn[standard]>=0.23.0
+
+# WebSocket
+websockets>=12.0
+
+# System Tray
+pystray>=0.19.5
+pillow>=10.0.0
+
+# Configuration
+python-dotenv>=1.0.0
+keyring>=24.0.0
+pydantic>=2.0.0
+pydantic-settings>=2.0.0
+
+# Database
+sqlalchemy[asyncio]>=2.0.0
+alembic>=1.12.0
+aiosqlite>=0.19.0
+
+# HTTP Client
+httpx>=0.25.0
+
+# Windows Notifications
+win10toast>=0.9
