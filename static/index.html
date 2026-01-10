@@ -328,12 +328,16 @@
                     const rankChange = getRankChangeDisplay(market.id, rank);
                     const volumeChange = formatVolumeChange(market.volume_24h, previousVolumes[market.id]);
 
+                    const marketUrl = market.slug
+                        ? `https://polymarket.com/event/${market.slug}`
+                        : `https://polymarket.com`;
+
                     html += `
                         <tr>
                             <td class="rank">#${rank}</td>
                             <td class="rank-change">${rankChange}</td>
                             <td class="question">
-                                <a href="https://polymarket.com/event/${market.condition_id}" target="_blank">
+                                <a href="${marketUrl}" target="_blank">
                                     ${market.question}
                                 </a>
                             </td>

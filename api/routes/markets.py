@@ -17,6 +17,7 @@ class MarketResponse(BaseModel):
 
     id: str
     condition_id: str
+    slug: Optional[str] = None
     question: str
     description: Optional[str] = None
     category: Optional[str] = None
@@ -290,6 +291,7 @@ def _parse_market_response(m: dict) -> MarketResponse:
     return MarketResponse(
         id=m.get("id", m.get("conditionId", "")),
         condition_id=m.get("conditionId", m.get("id", "")),
+        slug=m.get("slug"),
         question=m.get("question", ""),
         description=m.get("description"),
         category=m.get("category"),
