@@ -99,7 +99,7 @@ async def list_markets(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/search")
+@router.get("/search", response_model=list[MarketResponse])
 async def search_markets(
     q: str = Query(..., min_length=2),
     limit: int = Query(default=20, ge=1, le=50),
@@ -107,7 +107,16 @@ async def search_markets(
     """Search markets by text query."""
     try:
         markets = await gamma_client.search_markets(query=q, limit=limit)
-        return markets
+
+        result = []
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            try:
+                result.append(_parse_market_response(m))
+            except Exception:
+                continue
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
