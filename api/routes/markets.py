@@ -87,23 +87,12 @@ async def list_markets(
 
         result = []
         for m in markets:
-            # Skip non-dict items
             if not isinstance(m, dict):
                 continue
-
-            result.append(MarketResponse(
-                id=m.get("id", m.get("conditionId", "")),
-                condition_id=m.get("conditionId", m.get("id", "")),
-                question=m.get("question", ""),
-                description=m.get("description"),
-                category=m.get("category"),
-                end_date=m.get("endDate"),
-                active=m.get("active", True),
-                price_yes=_get_price(m, "yes"),
-                price_no=_get_price(m, "no"),
-                volume_24h=m.get("volume24hr"),
-                liquidity=m.get("liquidity"),
-            ))
+            try:
+                result.append(_parse_market_response(m))
+            except Exception:
+                continue
 
         return result
     except Exception as e:
@@ -131,22 +120,15 @@ async def get_trending_markets(
     try:
         markets = await gamma_client.get_trending(limit=limit)
 
-        return [
-            MarketResponse(
-                id=m.get("id", m.get("conditionId", "")),
-                condition_id=m.get("conditionId", m.get("id", "")),
-                question=m.get("question", ""),
-                description=m.get("description"),
-                category=m.get("category"),
-                end_date=m.get("endDate"),
-                active=m.get("active", True),
-                price_yes=_get_price(m, "yes"),
-                price_no=_get_price(m, "no"),
-                volume_24h=m.get("volume24hr"),
-                liquidity=m.get("liquidity"),
-            )
-            for m in markets
-        ]
+        result = []
+        for m in markets:
+            if not isinstance(m, dict):
+                continue
+            try:
+                result.append(_parse_market_response(m))
+            except Exception:
+                continue
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -159,19 +141,7 @@ async def get_market(market_id: str):
         if not market:
             raise HTTPException(status_code=404, detail="Market not found")
 
-        return MarketResponse(
-            id=market.get("id", market.get("conditionId", "")),
-            condition_id=market.get("conditionId", market.get("id", "")),
-            question=market.get("question", ""),
-            description=market.get("description"),
-            category=market.get("category"),
-            end_date=market.get("endDate"),
-            active=market.get("active", True),
-            price_yes=_get_price(market, "yes"),
-            price_no=_get_price(market, "no"),
-            volume_24h=market.get("volume24hr"),
-            liquidity=market.get("liquidity"),
-        )
+        return _parse_market_response(market)
     except HTTPException:
         raise
     except Exception as e:
@@ -267,12 +237,57 @@ async def remove_from_watchlist(market_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _get_price(market: dict, outcome: str) -> Optional[float]:
-    """Extract price for an outcome from market data."""
-    outcomes = market.get("outcomes", [])
-    for o in outcomes:
-        name = o.get("name", "").lower()
-        if outcome.lower() in name or name in outcome.lower():
-            price = o.get("price")
-            return float(price) if price is not None else None
-    return None
+def _parse_market_response(m: dict) -> MarketResponse:
+    """Parse raw market data into MarketResponse."""
+    import json
+
+    # Get prices from outcomePrices (JSON string or list)
+    outcome_prices = m.get("outcomePrices", [])
+    if isinstance(outcome_prices, str):
+        try:
+            outcome_prices = json.loads(outcome_prices)
+        except (json.JSONDecodeError, TypeError):
+            outcome_prices = []
+
+    price_yes = None
+    price_no = None
+    if len(outcome_prices) > 0:
+        try:
+            price_yes = float(outcome_prices[0])
+        except (ValueError, TypeError):
+            pass
+    if len(outcome_prices) > 1:
+        try:
+            price_no = float(outcome_prices[1])
+        except (ValueError, TypeError):
+            pass
+
+    # Get volume
+    volume = m.get("volumeNum") or m.get("volume24hr") or m.get("volume")
+    if volume and isinstance(volume, str):
+        try:
+            volume = float(volume)
+        except (ValueError, TypeError):
+            volume = None
+
+    # Get liquidity
+    liquidity = m.get("liquidityNum") or m.get("liquidity")
+    if liquidity and isinstance(liquidity, str):
+        try:
+            liquidity = float(liquidity)
+        except (ValueError, TypeError):
+            liquidity = None
+
+    return MarketResponse(
+        id=m.get("id", m.get("conditionId", "")),
+        condition_id=m.get("conditionId", m.get("id", "")),
+        question=m.get("question", ""),
+        description=m.get("description"),
+        category=m.get("category"),
+        end_date=m.get("endDate"),
+        active=m.get("active", True),
+        price_yes=price_yes,
+        price_no=price_no,
+        volume_24h=volume,
+        liquidity=liquidity,
+    )
