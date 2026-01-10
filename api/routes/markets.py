@@ -77,8 +77,21 @@ async def list_markets(
             active=active,
         )
 
-        return [
-            MarketResponse(
+        # Handle empty response
+        if not markets:
+            return []
+
+        # Handle case where API returns a wrapper object
+        if isinstance(markets, dict):
+            markets = markets.get("data", markets.get("markets", []))
+
+        result = []
+        for m in markets:
+            # Skip non-dict items
+            if not isinstance(m, dict):
+                continue
+
+            result.append(MarketResponse(
                 id=m.get("id", m.get("conditionId", "")),
                 condition_id=m.get("conditionId", m.get("id", "")),
                 question=m.get("question", ""),
@@ -90,9 +103,9 @@ async def list_markets(
                 price_no=_get_price(m, "no"),
                 volume_24h=m.get("volume24hr"),
                 liquidity=m.get("liquidity"),
-            )
-            for m in markets
-        ]
+            ))
+
+        return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
