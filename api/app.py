@@ -104,6 +104,14 @@ def create_app() -> FastAPI:
             return FileResponse(str(index_path))
         return RedirectResponse(url="/docs")
 
+    @app.get("/whales")
+    async def whales_page():
+        """Serve the whale alerts page."""
+        whales_path = static_dir / "whales.html"
+        if whales_path.exists():
+            return FileResponse(str(whales_path))
+        return RedirectResponse(url="/")
+
     return app
 
 
