@@ -1,4 +1,4 @@
-"""Pydantic data models for Polymarket Monitor."""
+"""Pydantic domain models for the Polymarket scanner platform."""
 
 from datetime import datetime
 from enum import Enum
@@ -6,14 +6,15 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from core.timeutil import utcnow
+
 
 class AlertType(str, Enum):
-    """Types of alerts."""
+    """Types of alerts (toast/audit categories)."""
 
-    PRICE_CHANGE = "price_change"
-    VOLUME_SPIKE = "volume_spike"
-    WHALE_TRADE = "whale_trade"
-    TRENDING = "trending"
+    SIGNAL = "signal"
+    ARBITRAGE = "arbitrage"
+    SYSTEM = "system"
 
 
 class Severity(str, Enum):
@@ -25,25 +26,56 @@ class Severity(str, Enum):
 
 
 class Market(BaseModel):
-    """Market/Event information."""
+    """Market information (parsed from Gamma)."""
 
     id: str
     condition_id: str
     question: str
     description: Optional[str] = None
     category: Optional[str] = None
+    slug: Optional[str] = None
     end_date: Optional[datetime] = None
+    start_date: Optional[datetime] = None
     active: bool = True
+    closed: bool = False
+    accepting_orders: bool = True
     token_id_yes: Optional[str] = None
     token_id_no: Optional[str] = None
+    outcomes: Optional[list[str]] = None
     price_yes: Optional[float] = None
     price_no: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    spread: Optional[float] = None
+    last_trade_price: Optional[float] = None
+    one_day_price_change: Optional[float] = None
+    tick_size: Optional[float] = None
     volume_24h: Optional[float] = None
     liquidity: Optional[float] = None
+    event_id: Optional[str] = None
+    event_slug: Optional[str] = None
+    group_item_title: Optional[str] = None
+    neg_risk: bool = False
+    neg_risk_market_id: Optional[str] = None
+    fees_enabled: bool = False
+    fee_rate: Optional[float] = None
+    fee_type: Optional[str] = None
+    resolution_source: Optional[str] = None
+    uma_resolution_status: Optional[str] = None
+    resolved_outcome: Optional[str] = None
+    closed_time: Optional[datetime] = None
+    tags: Optional[list[str]] = None
+    last_synced_at: Optional[datetime] = None
+
+    @property
+    def polymarket_url(self) -> str:
+        """Deep link to the market's event page."""
+        slug = self.event_slug or self.slug or ""
+        return f"https://polymarket.com/event/{slug}"
 
 
 class Price(BaseModel):
-    """Price data point (OHLC candle)."""
+    """Price data point (OHLC bar)."""
 
     market_id: str
     timestamp: datetime
@@ -52,21 +84,6 @@ class Price(BaseModel):
     low: float
     close: float
     volume: float = 0.0
-
-
-class Trade(BaseModel):
-    """Individual trade information."""
-
-    id: str
-    market_id: str
-    timestamp: datetime
-    side: str  # "buy" or "sell"
-    outcome: str  # "yes" or "no"
-    price: float
-    size: float  # In shares
-    value_usd: float  # In USD
-    maker: Optional[str] = None
-    taker: Optional[str] = None
 
 
 class Alert(BaseModel):
@@ -80,28 +97,31 @@ class Alert(BaseModel):
     message: str
     data: Optional[dict] = None
     acknowledged: bool = False
-    created_at: datetime = Field(default_factory=datetime.utcnow)
+    created_at: datetime = Field(default_factory=utcnow)
 
 
-class WatchlistItem(BaseModel):
-    """Watchlist entry."""
+class BookTop(BaseModel):
+    """Normalized top-of-book update from the stream."""
 
-    id: Optional[int] = None
-    market_id: str
-    price_threshold_pct: Optional[float] = None
-    volume_threshold_usd: Optional[float] = None
-    notes: Optional[str] = None
-    created_at: Optional[datetime] = None
+    asset_id: str
+    market_id: Optional[str] = None
+    bid: Optional[float] = None
+    ask: Optional[float] = None
+    mid: Optional[float] = None
+    bid_size: Optional[float] = None
+    ask_size: Optional[float] = None
+    timestamp: datetime = Field(default_factory=utcnow)
 
 
-class AlertConfig(BaseModel):
-    """Alert configuration."""
+class TradeTick(BaseModel):
+    """Normalized last-trade update from the stream."""
 
-    price_change_threshold_pct: float = 5.0
-    price_change_window_minutes: int = 5
-    volume_spike_threshold_usd: float = 10000.0
-    volume_spike_window_minutes: int = 5
-    whale_trade_threshold_usd: float = 5000.0
+    asset_id: str
+    market_id: Optional[str] = None
+    price: float
+    size: float = 0.0
+    side: Optional[str] = None
+    timestamp: datetime = Field(default_factory=utcnow)
 
 
 class SystemStatus(BaseModel):
@@ -113,24 +133,3 @@ class SystemStatus(BaseModel):
     markets_tracked: int = 0
     alerts_24h: int = 0
     uptime_seconds: float = 0.0
-
-
-class PriceUpdate(BaseModel):
-    """Real-time price update from WebSocket."""
-
-    market_id: str
-    token_id: str
-    price: float
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-
-class OrderBookSummary(BaseModel):
-    """Order book summary."""
-
-    market_id: str
-    token_id: str
-    best_bid: Optional[float] = None
-    best_ask: Optional[float] = None
-    spread: Optional[float] = None
-    bid_depth: float = 0.0
-    ask_depth: float = 0.0

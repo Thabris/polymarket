@@ -45,7 +45,8 @@ class ConnectionManager:
         message_json = json.dumps(message, default=str)
         disconnected = set()
 
-        for connection in self.active_connections:
+        # snapshot: connect/disconnect may mutate the set while a send awaits
+        for connection in list(self.active_connections):
             try:
                 await connection.send_text(message_json)
             except Exception:
@@ -58,8 +59,9 @@ class ConnectionManager:
     async def _subscribe_to_events(self) -> None:
         """Subscribe to event bus events for broadcasting."""
         event_bus.subscribe(EventType.ALERT_CREATED, self._handle_alert)
-        event_bus.subscribe(EventType.PRICE_UPDATE, self._handle_price_update)
-        event_bus.subscribe(EventType.TRADE, self._handle_trade)
+        event_bus.subscribe(EventType.SIGNAL_CREATED, self._handle_signal)
+        event_bus.subscribe(EventType.SIGNAL_UPDATED, self._handle_signal)
+        event_bus.subscribe(EventType.POSITION_UPDATED, self._handle_position)
         self._subscribed = True
         logger.info("WebSocket manager subscribed to events")
 
@@ -79,31 +81,24 @@ class ConnectionManager:
                 },
             })
 
-    async def _handle_price_update(self, event: Event) -> None:
-        """Handle price update event and broadcast to clients."""
-        data = event.data
+    @staticmethod
+    def _as_dict(data) -> dict:
         if hasattr(data, "model_dump"):
-            data = data.model_dump()
-        elif hasattr(data, "__dict__"):
-            data = data.__dict__
+            return data.model_dump()
+        if isinstance(data, dict):
+            return data
+        if hasattr(data, "__dict__"):
+            return dict(data.__dict__)
+        return {"value": str(data)}
 
-        await self.broadcast({
-            "type": "price_update",
-            "data": data,
-        })
+    async def _handle_signal(self, event: Event) -> None:
+        """Broadcast signal created/updated events to clients."""
+        msg_type = "signal_created" if event.type == EventType.SIGNAL_CREATED else "signal_updated"
+        await self.broadcast({"type": msg_type, "data": self._as_dict(event.data)})
 
-    async def _handle_trade(self, event: Event) -> None:
-        """Handle trade event and broadcast to clients."""
-        data = event.data
-        if hasattr(data, "model_dump"):
-            data = data.model_dump()
-        elif hasattr(data, "__dict__"):
-            data = data.__dict__
-
-        await self.broadcast({
-            "type": "trade",
-            "data": data,
-        })
+    async def _handle_position(self, event: Event) -> None:
+        """Broadcast paper-position updates to clients."""
+        await self.broadcast({"type": "position_updated", "data": self._as_dict(event.data)})
 
 
 # Global connection manager

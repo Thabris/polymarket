@@ -1,398 +1,231 @@
 #!/usr/bin/env python3
-"""
-Polymarket Monitor - Main Entry Point
+"""Polymarket Scanner — daemon entry point.
 
-A Python-based platform to monitor Polymarket betting markets,
-detect significant events, and deliver real-time alerts.
+Runs migrations, wires all components under a TaskSupervisor, serves the API,
+and shuts down gracefully in reverse order.
 
 Usage:
-    python main.py              # Start the full application
-    python main.py --api-only   # Start only the API server
-    python main.py --no-tray    # Start without system tray
+    python main.py              # full daemon (sync + stream + scanners + API)
+    python main.py --api-only   # API + market sync only (UI development)
 """
 
 import argparse
 import asyncio
 import logging
-import signal
+import logging.handlers
+import subprocess
 import sys
-import webbrowser
-from datetime import datetime
-from typing import Optional
+from pathlib import Path
+from typing import Awaitable, Callable, Optional
 
 import uvicorn
 
-from api.app import app
 from config.settings import settings
-from core.events import Event, EventType, event_bus
-from core.models import PriceUpdate
-from data.gamma_client import gamma_client
-from data.polymarket_client import polymarket_client
-from data.storage import db
-from data.websocket_manager import WebSocketManager
-from monitors.price_monitor import PriceMonitor
-from monitors.volume_monitor import VolumeMonitor
-from monitors.whale_monitor import WhaleMonitor
-from notifications.desktop_notifier import ConsoleNotifier, DesktopNotifier
-from ui.tray import SystemTray
-
-# Configure logging
-logging.basicConfig(
-    level=getattr(logging, settings.log_level.upper()),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-    ],
-)
 
 logger = logging.getLogger(__name__)
 
+BASE_DIR = Path(__file__).resolve().parent
 
-class PolymarketMonitor:
-    """Main application orchestrator."""
 
-    def __init__(
-        self,
-        enable_tray: bool = True,
-        api_only: bool = False,
-    ):
-        self.enable_tray = enable_tray
-        self.api_only = api_only
+def configure_logging() -> None:
+    """Console + rotating file logging."""
+    (BASE_DIR / "var").mkdir(exist_ok=True)
+    root = logging.getLogger()
+    root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
+    fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+    console = logging.StreamHandler(sys.stdout)
+    console.setFormatter(fmt)
+    root.addHandler(console)
+    file_handler = logging.handlers.RotatingFileHandler(
+        BASE_DIR / "var" / "daemon.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+    )
+    file_handler.setFormatter(fmt)
+    root.addHandler(file_handler)
 
-        self._running = False
-        self._start_time: Optional[datetime] = None
 
-        # Components
-        self._ws_manager: Optional[WebSocketManager] = None
-        self._monitors: list = []
-        self._notifiers: list = []
-        self._tray: Optional[SystemTray] = None
-        self._server_task: Optional[asyncio.Task] = None
+def run_migrations() -> None:
+    """Run `alembic upgrade head` in a subprocess (env.py uses asyncio.run,
+    so it cannot be invoked from inside a running event loop)."""
+    logger.info("Running database migrations...")
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=str(BASE_DIR),
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        logger.error(f"alembic upgrade failed:\n{result.stdout}\n{result.stderr}")
+        raise SystemExit(1)
+    logger.info("Migrations up to date")
 
-    async def start(self) -> None:
-        """Start the application."""
-        if self._running:
-            return
 
-        logger.info("=" * 50)
-        logger.info("Starting Polymarket Monitor...")
-        logger.info("=" * 50)
+class TaskSupervisor:
+    """Supervises long-running tasks: restart-on-crash with backoff, status."""
 
-        self._running = True
-        self._start_time = datetime.utcnow()
+    def __init__(self, runtime) -> None:
+        self.runtime = runtime
+        self._tasks: dict[str, asyncio.Task] = {}
+        self._stopping = False
 
-        try:
-            # Initialize database
-            await db.init_db()
-            logger.info("Database initialized")
+    def spawn(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
+        """Start a supervised task from an async factory."""
+        self.runtime.set_task_status(name, crashes=0, last_error=None, running=True)
+        self._tasks[name] = asyncio.create_task(self._supervise(name, factory), name=name)
 
-            # Start event bus
-            await event_bus.start()
-            logger.info("Event bus started")
-
-            # Connect API clients
-            await gamma_client.connect()
-            logger.info("Gamma API client connected")
-
-            await polymarket_client.connect()
-            logger.info("Polymarket client connected")
-
-            if not self.api_only:
-                # Start monitoring components
-                await self._start_monitoring()
-
-            # Start system tray
-            if self.enable_tray and not self.api_only:
-                self._start_tray()
-
-            # Start API server
-            self._server_task = asyncio.create_task(self._run_api_server())
-
-            logger.info("=" * 50)
-            logger.info(f"Polymarket Monitor running!")
-            logger.info(f"API: http://{settings.api_host}:{settings.api_port}")
-            logger.info(f"Docs: http://{settings.api_host}:{settings.api_port}/docs")
-            logger.info("=" * 50)
-
-        except Exception as e:
-            logger.error(f"Failed to start: {e}")
-            await self.stop()
-            raise
-
-    async def _start_monitoring(self) -> None:
-        """Start monitoring components."""
-        # Initialize WebSocket manager
-        self._ws_manager = WebSocketManager(
-            on_price_update=self._on_price_update,
-        )
-        await self._ws_manager.connect()
-        logger.info("WebSocket manager started")
-
-        # Initialize monitors
-        self._monitors = [
-            PriceMonitor(),
-            VolumeMonitor(),
-            WhaleMonitor(),
-        ]
-
-        for monitor in self._monitors:
-            await monitor.start()
-        logger.info(f"Started {len(self._monitors)} monitors")
-
-        # Initialize notifiers
-        self._notifiers = [
-            DesktopNotifier(),
-            ConsoleNotifier(),
-        ]
-
-        for notifier in self._notifiers:
-            await notifier.start()
-        logger.info(f"Started {len(self._notifiers)} notifiers")
-
-        # Fetch initial markets and subscribe
-        await self._subscribe_to_markets()
-
-    async def _subscribe_to_markets(self) -> None:
-        """Fetch and subscribe to active markets with pagination."""
-        try:
-            all_markets = []
-            offset = 0
-            batch_size = 100
-            max_markets = settings.max_markets or 10000  # 0 means fetch all
-
-            while len(all_markets) < max_markets:
-                markets = await gamma_client.sync_markets(limit=batch_size)
-                if not markets:
-                    break
-
-                # Fetch with offset for next batch
-                raw_markets = await gamma_client.get_markets(
-                    limit=batch_size,
-                    offset=offset,
-                    active=True,
-                )
-                if not raw_markets:
-                    break
-
-                for m in raw_markets:
-                    if not isinstance(m, dict):
-                        continue
-                    try:
-                        market = gamma_client.parse_market(m)
-                        all_markets.append(market)
-                    except Exception:
-                        continue
-
-                logger.info(f"Fetched {len(all_markets)} markets so far...")
-
-                if len(raw_markets) < batch_size:
-                    break  # No more markets
-
-                offset += batch_size
-
-                # Respect rate limits
-                await asyncio.sleep(0.2)
-
-            logger.info(f"Fetched {len(all_markets)} total markets")
-
-            # Subscribe to all markets
-            subscribed = 0
-            for market in all_markets:
-                if market.token_id_yes:
-                    await self._ws_manager.subscribe(market.token_id_yes)
-                    subscribed += 1
-                if market.token_id_no:
-                    await self._ws_manager.subscribe(market.token_id_no)
-                    subscribed += 1
-
-                # Store in database
-                await db.upsert_market(market.model_dump())
-
-            logger.info(f"Subscribed to {subscribed} tokens from {len(all_markets)} markets")
-
-        except Exception as e:
-            logger.error(f"Failed to subscribe to markets: {e}")
-
-    def _on_price_update(self, update: PriceUpdate) -> None:
-        """Handle price update from WebSocket."""
-        # Emit event for monitors
-        event_bus.emit_sync(
-            Event(
-                type=EventType.PRICE_UPDATE,
-                data=update,
-                source="websocket",
-            )
-        )
-
-    def _start_tray(self) -> None:
-        """Start the system tray."""
-        self._tray = SystemTray(
-            on_start=self._on_tray_start,
-            on_stop=self._on_tray_stop,
-            on_exit=self._on_tray_exit,
-            on_open_dashboard=self._on_open_dashboard,
-        )
-        self._tray.start()
-        self._tray.set_monitoring(True)
-
-    def _on_tray_start(self) -> None:
-        """Handle start from tray."""
-        if self._tray:
-            self._tray.set_monitoring(True)
-        logger.info("Monitoring started from tray")
-
-    def _on_tray_stop(self) -> None:
-        """Handle stop from tray."""
-        if self._tray:
-            self._tray.set_monitoring(False)
-        logger.info("Monitoring stopped from tray")
-
-    def _on_tray_exit(self) -> None:
-        """Handle exit from tray."""
-        logger.info("Exit requested from tray")
-        asyncio.get_event_loop().call_soon_threadsafe(
-            lambda: asyncio.create_task(self.stop())
-        )
-
-    def _on_open_dashboard(self) -> None:
-        """Open dashboard in browser."""
-        url = f"http://{settings.api_host}:{settings.api_port}/docs"
-        webbrowser.open(url)
-
-    async def _run_api_server(self) -> None:
-        """Run the API server."""
-        config = uvicorn.Config(
-            app,
-            host=settings.api_host,
-            port=settings.api_port,
-            log_level=settings.log_level.lower(),
-            access_log=False,
-        )
-        server = uvicorn.Server(config)
-        await server.serve()
+    async def _supervise(self, name: str, factory: Callable[[], Awaitable[None]]) -> None:
+        crashes = 0
+        delay = 5.0
+        while not self._stopping:
+            try:
+                await factory()
+                if not self._stopping:
+                    logger.warning(f"task {name} returned unexpectedly; restarting")
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 — supervisor must survive anything
+                crashes += 1
+                logger.error(f"task {name} crashed ({crashes}): {e!r}")
+                self.runtime.set_task_status(name, crashes=crashes, last_error=repr(e))
+            if self._stopping:
+                break
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60.0)
 
     async def stop(self) -> None:
-        """Stop the application."""
-        if not self._running:
-            return
-
-        logger.info("Stopping Polymarket Monitor...")
-        self._running = False
-
-        # Stop tray
-        if self._tray:
-            self._tray.stop()
-
-        # Stop monitors
-        for monitor in self._monitors:
-            await monitor.stop()
-
-        # Stop notifiers
-        for notifier in self._notifiers:
-            await notifier.stop()
-
-        # Stop WebSocket
-        if self._ws_manager:
-            await self._ws_manager.disconnect()
-
-        # Stop event bus
-        await event_bus.stop()
-
-        # Close clients
-        await gamma_client.close()
-        await polymarket_client.close()
-
-        # Close database
-        await db.close()
-
-        # Cancel API server
-        if self._server_task:
-            self._server_task.cancel()
+        """Cancel all tasks with a per-task timeout."""
+        self._stopping = True
+        for name, task in reversed(list(self._tasks.items())):
+            task.cancel()
             try:
-                await self._server_task
-            except asyncio.CancelledError:
+                await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
                 pass
+            except Exception:  # noqa: BLE001
+                pass
+            self.runtime.set_task_status(name, running=False)
 
-        logger.info("Polymarket Monitor stopped")
 
+async def run_daemon(api_only: bool) -> None:
+    """Wire components and run until interrupted."""
+    from core.events import event_bus
+    from core.runtime import runtime
+    from data.gamma_client import gamma_client
+    from data.storage import db
+    from data.universe import UniverseManager
 
-async def main(args: argparse.Namespace) -> None:
-    """Main async entry point."""
-    monitor = PolymarketMonitor(
-        enable_tray=not args.no_tray,
-        api_only=args.api_only,
+    runtime.register("daemon", {"api_only": api_only})
+
+    from data.clob_client import clob_client
+
+    await db.init_db()
+    await event_bus.start()
+    await gamma_client.connect()
+    await clob_client.connect()
+
+    universe = UniverseManager(gamma_client, db)
+    runtime.register("universe", universe)
+
+    # The initial sync MUST precede component build: news-fade baseline seeding
+    # and the stream universe pre-seed both read universe.markets().
+    logger.info("Initial market sync (may take ~30s)...")
+    try:
+        await universe.refresh()
+    except Exception as e:  # noqa: BLE001 — boot must survive a bad first sync
+        logger.error(f"initial sync failed (continuing, will retry on loop): {e}")
+
+    # SignalService, PaperRouter, MarketStream, BarRecorder, and the scanners
+    # attach here. Import lazily so phases stay optional.
+    components = await _build_optional_components(api_only, universe, runtime)
+
+    supervisor = TaskSupervisor(runtime)
+    runtime.register("supervisor", supervisor)
+    supervisor.spawn("universe", universe.run_forever)
+    for name, factory in components:
+        supervisor.spawn(name, factory)
+
+    # Uvicorn as a supervised task; signal handling stays with us
+    from api.app import app
+    config = uvicorn.Config(
+        app,
+        host=settings.api_host,
+        port=settings.api_port,
+        log_level="warning",
     )
+    server = uvicorn.Server(config)
+    server.install_signal_handlers = lambda: None  # type: ignore[method-assign]
+    api_task = asyncio.create_task(server.serve(), name="api")
 
-    # Handle shutdown signals
-    loop = asyncio.get_event_loop()
+    logger.info(f"API at http://{settings.api_host}:{settings.api_port} — Ctrl+C to stop")
 
-    def shutdown_handler():
-        logger.info("Shutdown signal received")
-        asyncio.create_task(monitor.stop())
+    stop = asyncio.Event()
+    try:
+        await stop.wait()
+    except asyncio.CancelledError:
+        pass
+    finally:
+        logger.info("Shutting down...")
+        server.should_exit = True
+        try:
+            await asyncio.wait_for(api_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            api_task.cancel()
+        except BaseException as e:  # noqa: BLE001 — uvicorn may store SystemExit
+            # (e.g. port already bound); the remaining cleanup MUST still run
+            logger.error(f"api task failed: {e!r}")
+        await supervisor.stop()
+        for stopper in _component_stoppers(runtime):
+            try:
+                await stopper()
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"shutdown step failed: {e}")
+        await clob_client.close()
+        await gamma_client.close()
+        await event_bus.stop()
+        await db.close()
+        logger.info("Shutdown complete")
 
-    if sys.platform != "win32":
-        loop.add_signal_handler(signal.SIGINT, shutdown_handler)
-        loop.add_signal_handler(signal.SIGTERM, shutdown_handler)
+
+async def _build_optional_components(api_only: bool, universe, runtime) -> list:
+    """Attach phase-2+ components when their modules exist. Returns
+    [(task_name, factory), ...] for the supervisor."""
+    tasks: list = []
+    if api_only:
+        return tasks
+    # Phase 2+: signals/execution; Phase 4: stream + bars + fade; Phase 3/5: scanners.
+    try:
+        from signals.service import build_signal_stack  # noqa: PLC0415
+    except ImportError:
+        return tasks
+    stack_tasks = await build_signal_stack(universe, runtime)
+    tasks.extend(stack_tasks)
+    return tasks
+
+
+def _component_stoppers(runtime) -> list:
+    """Async stop() callables of registered components that have one."""
+    stoppers = []
+    for name in ("stream", "bars"):
+        comp = runtime.get(name)
+        stop = getattr(comp, "stop", None)
+        if comp is not None and callable(stop):
+            stoppers.append(stop)
+    return stoppers
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Polymarket Scanner daemon")
+    parser.add_argument("--api-only", action="store_true", help="API + sync only")
+    args = parser.parse_args()
+
+    configure_logging()
+    run_migrations()
 
     try:
-        await monitor.start()
-
-        # Keep running until stopped
-        while monitor._running:
-            await asyncio.sleep(1)
-
+        asyncio.run(run_daemon(api_only=args.api_only))
     except KeyboardInterrupt:
-        logger.info("Interrupted by user")
-    finally:
-        await monitor.stop()
-
-
-def parse_args() -> argparse.Namespace:
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Polymarket Monitor - Market monitoring and alerts",
-    )
-
-    parser.add_argument(
-        "--api-only",
-        action="store_true",
-        help="Run only the API server without monitoring",
-    )
-
-    parser.add_argument(
-        "--no-tray",
-        action="store_true",
-        help="Disable system tray icon",
-    )
-
-    parser.add_argument(
-        "--host",
-        type=str,
-        default=None,
-        help="API server host (default: from settings)",
-    )
-
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=None,
-        help="API server port (default: from settings)",
-    )
-
-    return parser.parse_args()
+        # asyncio.run already ran the finally-block cleanup via cancellation
+        logging.getLogger(__name__).info("Interrupted — exited")
 
 
 if __name__ == "__main__":
-    args = parse_args()
-
-    # Override settings if provided
-    if args.host:
-        settings.api_host = args.host
-    if args.port:
-        settings.api_port = args.port
-
-    # Run the application
-    try:
-        asyncio.run(main(args))
-    except KeyboardInterrupt:
-        pass
+    main()

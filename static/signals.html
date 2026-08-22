@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Signals — Polymarket Scanner</title>
+    <link rel="stylesheet" href="/static/assets/style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Signals</h1>
+    <div class="subtitle">
+        <span id="conn" class="conn-dot off"></span><span id="conn-label">connecting…</span>
+        — live feed of scanner signals; grade C is listed but never papered or toasted
+    </div>
+
+    <div class="controls">
+        <select id="f-strategy">
+            <option value="">All strategies</option>
+            <option value="theta">Theta</option>
+            <option value="news_fade">News fade</option>
+            <option value="calendar_arb">Calendar arb</option>
+            <option value="manual">Manual</option>
+        </select>
+        <select id="f-status">
+            <option value="">All statuses</option>
+            <option value="open">Open</option>
+            <option value="filled">Filled</option>
+            <option value="expired">Expired</option>
+            <option value="resolved">Resolved</option>
+        </select>
+        <select id="f-grade">
+            <option value="">All grades</option>
+            <option value="A">A</option>
+            <option value="B">B</option>
+            <option value="C">C</option>
+        </select>
+        <button id="refresh">Refresh</button>
+    </div>
+
+    <div id="list"></div>
+</div>
+
+<div class="modal-backdrop" id="fill-modal">
+    <div class="modal">
+        <h3>Mark as traded</h3>
+        <div class="row"><label>Price (0–1)</label><input type="number" id="fill-price" step="0.001" min="0.001" max="0.999"></div>
+        <div class="row"><label>Size (shares)</label><input type="number" id="fill-size" step="1" min="1" value="100"></div>
+        <div class="row"><label>Fee paid (USD, optional)</label><input type="number" id="fill-fee" step="0.01" min="0"></div>
+        <div class="row"><label>Note</label><input type="text" id="fill-note" placeholder="optional"></div>
+        <div class="actions">
+            <button id="fill-cancel">Cancel</button>
+            <button class="primary" id="fill-save">Save fill</button>
+        </div>
+    </div>
+</div>
+
+<script src="/static/assets/nav.js" data-active="signals"></script>
+<script>
+const API = "/api";
+let fillSignalId = null;
+
+function fmtPct(x) { return x == null ? "—" : (x * 100).toFixed(1) + "%"; }
+function fmtPrice(x) { return x == null ? "—" : Number(x).toFixed(3); }
+function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
+function strategyDetails(s) {
+    const snap = s.snapshot || {};
+    if (s.strategy === "theta") {
+        return `net yield ${fmtPct(snap.net_yield)} · annualized ${fmtPct(snap.annualized_yield)} · ${snap.days_to_resolution != null ? Number(snap.days_to_resolution).toFixed(1) + "d" : "—"} · ${esc(snap.category || "?")}`;
+    }
+    if (s.strategy === "news_fade") {
+        const zone = s.entry_zone_low != null ? `${fmtPrice(s.entry_zone_low)}–${fmtPrice(s.entry_zone_high)}` : "—";
+        return `spike ${fmtPct(snap.spike_pp)} in ${snap.window_minutes || "?"}min · baseline ${fmtPrice(snap.baseline)} · zone ${zone}`;
+    }
+    if (s.strategy === "calendar_arb") {
+        return `edge ${fmtPct(snap.edge)} net · near "${esc(snap.near_question || "")}" vs far "${esc(snap.far_question || "")}" · similarity ${esc(snap.similarity || "?")}`;
+    }
+    return esc(snap.note || "");
+}
+
+function card(s) {
+    const snap = s.snapshot || {};
+    const slug = snap.event_slug || snap.slug;
+    const url = slug ? `https://polymarket.com/event/${encodeURIComponent(slug)}` : null;
+    const created = new Date(s.created_at + (s.created_at.endsWith("Z") ? "" : "Z")).toLocaleString();
+    return `<div class="card" id="signal-${s.id}">
+        <div style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+            <span class="chip strategy">${esc(s.strategy)}</span>
+            <span class="chip grade-${esc(s.grade)}">${esc(s.grade)}</span>
+            <span class="chip status-${esc(s.status)}">${esc(s.status)}</span>
+            <span class="muted" style="font-size:0.78rem;">#${s.id} · ${created}</span>
+            <span style="margin-left:auto; display:flex; gap:8px;">
+                ${s.status === "open" || s.status === "filled" ? `<button onclick="openFillModal(${s.id}, ${s.entry_price ?? "null"})">Mark traded</button>` : ""}
+                ${!s.acknowledged ? `<button onclick="ackSignal(${s.id})">Ack</button>` : ""}
+            </span>
+        </div>
+        <div style="margin:8px 0 4px; font-size:0.98rem;">
+            ${url ? `<a class="mkt-link" href="${esc(url)}" target="_blank" rel="noopener">${esc(snap.question || s.market_id || "?")}</a>` : esc(snap.question || s.market_id || "?")}
+        </div>
+        <div class="muted" style="font-size:0.85rem;">
+            ${esc(s.side)} @ ${fmtPrice(s.entry_price)} · ${strategyDetails(s)}
+        </div>
+    </div>`;
+}
+
+async function load() {
+    const params = new URLSearchParams();
+    const strategy = document.getElementById("f-strategy").value;
+    const status = document.getElementById("f-status").value;
+    const grade = document.getElementById("f-grade").value;
+    if (strategy) params.set("strategy", strategy);
+    if (status) params.set("status", status);
+    if (grade) params.set("grade", grade);
+    params.set("limit", "100");
+    const res = await fetch(`${API}/signals?${params}`);
+    const signals = await res.json();
+    const list = document.getElementById("list");
+    list.innerHTML = signals.length
+        ? signals.map(card).join("")
+        : `<div class="empty">No signals yet — scanners emit as they find opportunities.</div>`;
+}
+
+async function ackSignal(id) {
+    await fetch(`${API}/signals/${id}/ack`, { method: "POST" });
+    load();
+}
+
+function openFillModal(id, entryPrice) {
+    fillSignalId = id;
+    if (entryPrice != null) document.getElementById("fill-price").value = entryPrice;
+    document.getElementById("fill-modal").classList.add("open");
+}
+
+document.getElementById("fill-cancel").onclick = () =>
+    document.getElementById("fill-modal").classList.remove("open");
+
+document.getElementById("fill-save").onclick = async () => {
+    const price = parseFloat(document.getElementById("fill-price").value);
+    const size = parseFloat(document.getElementById("fill-size").value);
+    const fee = document.getElementById("fill-fee").value;
+    const note = document.getElementById("fill-note").value;
+    if (!(price > 0 && price < 1) || !(size > 0)) { alert("Enter a valid price (0-1) and size"); return; }
+    const body = { price, size, note: note || null };
+    if (fee) body.fee_paid = parseFloat(fee);
+    const res = await fetch(`${API}/signals/${fillSignalId}/fills`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+    });
+    if (res.ok) {
+        document.getElementById("fill-modal").classList.remove("open");
+        load();
+    } else {
+        alert("Failed to save fill: " + (await res.text()));
+    }
+};
+
+// live updates over the app's own WebSocket
+function connectWs() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws/stream`);
+    const dot = document.getElementById("conn");
+    const label = document.getElementById("conn-label");
+    ws.onopen = () => { dot.className = "conn-dot on"; label.textContent = "live"; };
+    ws.onclose = () => {
+        dot.className = "conn-dot off"; label.textContent = "reconnecting…";
+        setTimeout(connectWs, 3000);
+    };
+    ws.onmessage = (e) => {
+        try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === "ping") { ws.send(JSON.stringify({ type: "pong" })); return; }
+            if (["signal_created", "signal_updated", "position_updated", "alert"].includes(msg.type)) {
+                load();
+            }
+        } catch { /* ignore */ }
+    };
+}
+
+document.getElementById("refresh").onclick = load;
+for (const id of ["f-strategy", "f-status", "f-grade"]) {
+    document.getElementById(id).addEventListener("change", load);
+}
+load();
+connectWs();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

@@ -1,10 +1,10 @@
-"""Desktop notification delivery using win10toast."""
+"""Desktop notification delivery using winotify (Windows 10/11 toasts)."""
 
 import asyncio
 import logging
-import sys
 from typing import Optional
 
+from config.settings import settings
 from core.models import Alert, Severity
 from notifications.base_notifier import BaseNotifier
 
@@ -12,107 +12,67 @@ logger = logging.getLogger(__name__)
 
 
 class DesktopNotifier(BaseNotifier):
+    """Windows toast notifications via winotify.
+
+    winotify builds the toast synchronously (fast) — run it in an executor
+    to keep the event loop clean. Clicking a toast opens the signals page.
     """
-    Desktop notification delivery using Windows toast notifications.
 
-    Uses win10toast library for Windows 10/11 toast notifications.
-    Falls back to logging on non-Windows platforms.
-    """
+    def __init__(self):
+        super().__init__(name="desktop")
+        self._available: Optional[bool] = None
 
-    def __init__(self, app_name: str = "Polymarket Monitor", **kwargs):
-        super().__init__(name="desktop", **kwargs)
-        self.app_name = app_name
-        self._toaster = None
-        self._initialized = False
-
-    async def start(self) -> None:
-        """Start the notifier and initialize toaster."""
-        await super().start()
-
-        if sys.platform == "win32":
+    def _ensure_available(self) -> bool:
+        if self._available is None:
             try:
-                from win10toast import ToastNotifier
-
-                self._toaster = ToastNotifier()
-                self._initialized = True
-                logger.info("Desktop notifications initialized (win10toast)")
+                import winotify  # noqa: F401
+                self._available = True
+                logger.info("Desktop notifications initialized (winotify)")
             except ImportError:
-                logger.warning(
-                    "win10toast not installed. Desktop notifications disabled."
-                )
-            except Exception as e:
-                logger.warning(f"Failed to initialize win10toast: {e}")
-        else:
-            logger.info("Desktop notifications not supported on this platform")
+                self._available = False
+                logger.warning("winotify not installed; desktop notifications disabled")
+        return self._available
 
     async def send(self, alert: Alert) -> bool:
-        """Send a desktop notification."""
-        if not self._initialized or self._toaster is None:
-            # Fall back to logging
-            logger.info(f"[ALERT] {alert.title}: {alert.message}")
-            return True
-
+        """Send a Windows toast for an alert."""
+        if not self._ensure_available():
+            return False
         try:
-            # Get icon based on severity
-            icon_path = self._get_icon_path(alert.severity)
-
-            # Determine duration based on severity
-            duration = self._get_duration(alert.severity)
-
-            # Run in thread to avoid blocking
-            await asyncio.get_event_loop().run_in_executor(
-                None,
-                lambda: self._toaster.show_toast(
-                    title=alert.title,
-                    msg=alert.message[:256],  # Windows has message length limits
-                    icon_path=icon_path,
-                    duration=duration,
-                    threaded=True,
-                ),
-            )
-
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self._show_toast, alert)
             return True
-
-        except Exception as e:
-            logger.error(f"Failed to send desktop notification: {e}")
+        except Exception as e:  # noqa: BLE001 — notification failure is non-fatal
+            logger.error(f"Toast failed: {e}")
             return False
 
-    def _get_icon_path(self, severity: Severity) -> Optional[str]:
-        """Get icon path based on alert severity."""
-        # For now, return None to use default icon
-        # In future, could return custom icons per severity
-        return None
+    def _show_toast(self, alert: Alert) -> None:
+        from winotify import Notification, audio
 
-    def _get_duration(self, severity: Severity) -> int:
-        """Get notification duration in seconds based on severity."""
-        if severity == Severity.CRITICAL:
-            return 10
-        elif severity == Severity.WARNING:
-            return 7
-        return 5
+        toast = Notification(
+            app_id="Polymarket Scanner",
+            title=alert.title,
+            msg=alert.message[:200],
+            launch=f"http://{settings.api_host}:{settings.api_port}/static/signals.html",
+        )
+        if alert.severity in (Severity.WARNING, Severity.CRITICAL):
+            toast.set_audio(audio.Default, loop=False)
+        toast.show()
 
 
 class ConsoleNotifier(BaseNotifier):
-    """
-    Console/log-based notification for debugging and non-Windows platforms.
-    """
+    """Console fallback notifier (always available)."""
 
-    def __init__(self, **kwargs):
-        super().__init__(name="console", **kwargs)
+    SEVERITY_MARKS = {
+        Severity.INFO: "[i]",
+        Severity.WARNING: "[!]",
+        Severity.CRITICAL: "[!!]",
+    }
+
+    def __init__(self):
+        super().__init__(name="console")
 
     async def send(self, alert: Alert) -> bool:
-        """Log the alert to console."""
-        severity_emoji = {
-            Severity.INFO: "ℹ️",
-            Severity.WARNING: "⚠️",
-            Severity.CRITICAL: "🚨",
-        }
-
-        emoji = severity_emoji.get(alert.severity, "ℹ️")
-        print(f"\n{emoji} [{alert.severity.value.upper()}] {alert.title}")
-        print(f"   {alert.message}")
-
-        if alert.market_id:
-            print(f"   Market: {alert.market_id}")
-
+        """Log the alert to the console."""
+        mark = self.SEVERITY_MARKS.get(alert.severity, "[?]")
+        logger.info(f"{mark} ALERT: {alert.title} — {alert.message}")
         return True

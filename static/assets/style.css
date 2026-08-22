@@ -1,0 +1,110 @@
+/* Shared styles — Polymarket Scanner (GitHub-dark palette, matches index.html) */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, sans-serif;
+    background: #0d1117;
+    color: #c9d1d9;
+    padding: 20px;
+    min-height: 100vh;
+}
+
+.container { max-width: 1400px; margin: 0 auto; }
+
+h1 { color: #58a6ff; margin-bottom: 6px; font-size: 1.8rem; }
+.subtitle { color: #8b949e; margin-bottom: 20px; font-size: 0.9rem; }
+
+/* nav */
+.nav {
+    display: flex; gap: 4px; margin-bottom: 24px;
+    border-bottom: 1px solid #21262d; padding-bottom: 0;
+}
+.nav a {
+    color: #8b949e; text-decoration: none; padding: 8px 14px;
+    font-size: 0.9rem; border-bottom: 2px solid transparent;
+}
+.nav a:hover { color: #c9d1d9; }
+.nav a.active { color: #58a6ff; border-bottom-color: #58a6ff; }
+
+/* cards & stat rows */
+.stat-row { display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 20px; }
+.stat-card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+    padding: 14px 18px; min-width: 160px;
+}
+.stat-card .label { color: #8b949e; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.stat-card .value { font-size: 1.4rem; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+.card {
+    background: #161b22; border: 1px solid #21262d; border-radius: 8px;
+    padding: 16px 18px; margin-bottom: 12px;
+}
+.card:hover { border-color: #30363d; }
+
+/* tables */
+.tbl { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.tbl th {
+    text-align: left; color: #8b949e; font-size: 0.72rem; text-transform: uppercase;
+    letter-spacing: 0.05em; padding: 8px 10px; border-bottom: 1px solid #21262d;
+}
+.tbl td { padding: 9px 10px; border-bottom: 1px solid #161b22; font-variant-numeric: tabular-nums; }
+.tbl tr:hover td { background: #161b22; }
+
+/* chips & badges */
+.chip {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    font-size: 0.72rem; font-weight: 600; border: 1px solid;
+}
+.chip.grade-A { color: #3fb950; border-color: #3fb950; }
+.chip.grade-B { color: #58a6ff; border-color: #58a6ff; }
+.chip.grade-C { color: #d29922; border-color: #d29922; }
+.chip.status-open { color: #58a6ff; border-color: #30363d; }
+.chip.status-filled { color: #3fb950; border-color: #30363d; }
+.chip.status-expired { color: #8b949e; border-color: #30363d; }
+.chip.status-resolved { color: #a371f7; border-color: #30363d; }
+.chip.status-cancelled { color: #8b949e; border-color: #30363d; }
+.chip.strategy { color: #c9d1d9; border-color: #30363d; background: #21262d; }
+.chip.mismatch { color: #f85149; border-color: #f85149; }
+
+.pos { color: #3fb950; }
+.neg { color: #f85149; }
+.muted { color: #8b949e; }
+
+/* controls */
+.controls { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; align-items: center; }
+select, input[type="text"], input[type="number"] {
+    background: #0d1117; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 10px; font-size: 0.85rem;
+}
+button {
+    background: #21262d; color: #c9d1d9; border: 1px solid #30363d;
+    border-radius: 6px; padding: 6px 14px; font-size: 0.85rem; cursor: pointer;
+}
+button:hover { background: #30363d; }
+button.primary { background: #238636; border-color: #2ea043; color: #fff; }
+button.primary:hover { background: #2ea043; }
+button:focus-visible, a:focus-visible { outline: 2px solid #58a6ff; outline-offset: 2px; }
+
+a.mkt-link { color: #58a6ff; text-decoration: none; }
+a.mkt-link:hover { text-decoration: underline; }
+
+/* modal */
+.modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 50;
+}
+.modal-backdrop.open { display: flex; }
+.modal {
+    background: #161b22; border: 1px solid #30363d; border-radius: 8px;
+    padding: 22px; width: 380px; max-width: 92vw;
+}
+.modal h3 { color: #c9d1d9; margin-bottom: 14px; font-size: 1.05rem; }
+.modal .row { margin-bottom: 10px; display: flex; flex-direction: column; gap: 4px; }
+.modal label { color: #8b949e; font-size: 0.78rem; }
+.modal .actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 14px; }
+
+.empty { color: #8b949e; padding: 30px; text-align: center; }
+.conn-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.conn-dot.on { background: #3fb950; }
+.conn-dot.off { background: #f85149; }

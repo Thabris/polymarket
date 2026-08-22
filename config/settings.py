@@ -1,4 +1,8 @@
-"""Application settings with environment variable and keyring support."""
+"""Application settings with environment variable support.
+
+All scanner parameters are env-overridable (pydantic-settings parses JSON
+for dict/list fields, e.g. THETA_EXCLUDED_CATEGORIES='["weather"]').
+"""
 
 from functools import lru_cache
 from typing import Optional
@@ -17,79 +21,106 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Polymarket API Credentials (loaded via credentials.py for security)
+    # Polymarket API credentials (only needed for the future LiveRouter)
     polymarket_api_key: Optional[str] = Field(default=None)
     polymarket_api_secret: Optional[str] = Field(default=None)
     polymarket_private_key: Optional[str] = Field(default=None)
 
     # Database
-    database_url: str = Field(
-        default="sqlite+aiosqlite:///./data/polymarket.db",
-        description="Database connection URL",
-    )
+    database_url: str = Field(default="sqlite+aiosqlite:///./var/polymarket.db")
 
-    # API Server
-    api_host: str = Field(default="127.0.0.1", description="API server host")
-    api_port: int = Field(default=8000, description="API server port")
+    # API server
+    api_host: str = Field(default="127.0.0.1")
+    api_port: int = Field(default=8000)
 
-    # Alert Thresholds
-    price_change_threshold_pct: float = Field(
-        default=5.0,
-        description="Price change percentage to trigger alert",
-    )
-    price_change_window_minutes: int = Field(
-        default=5,
-        description="Time window for price change detection (minutes)",
-    )
-    volume_spike_threshold_usd: float = Field(
-        default=10000.0,
-        description="Volume threshold in USD to trigger alert",
-    )
-    volume_spike_window_minutes: int = Field(
-        default=5,
-        description="Time window for volume spike detection (minutes)",
-    )
-    whale_trade_threshold_usd: float = Field(
-        default=5000.0,
-        description="Single trade size in USD to trigger whale alert",
-    )
-
-    # Polymarket API URLs
-    polymarket_clob_url: str = Field(
-        default="https://clob.polymarket.com",
-        description="Polymarket CLOB API URL",
-    )
-    polymarket_gamma_url: str = Field(
-        default="https://gamma-api.polymarket.com",
-        description="Polymarket Gamma API URL",
-    )
+    # Polymarket endpoints
+    polymarket_clob_url: str = Field(default="https://clob.polymarket.com")
+    polymarket_gamma_url: str = Field(default="https://gamma-api.polymarket.com")
     polymarket_ws_url: str = Field(
-        default="wss://ws-subscriptions-clob.polymarket.com/ws/market",
-        description="Polymarket WebSocket URL",
+        default="wss://ws-subscriptions-clob.polymarket.com/ws/market"
     )
 
     # Logging
-    log_level: str = Field(default="INFO", description="Logging level")
+    log_level: str = Field(default="INFO")
 
-    # Market Settings
-    max_markets: int = Field(
-        default=500,
-        description="Maximum number of markets to monitor (0 for all)",
-    )
+    # Universe / market sync
+    scan_min_liquidity: float = Field(default=10000.0)
+    scan_min_volume_24h: float = Field(default=1000.0)
+    stream_universe_size: int = Field(default=300)
+    universe_refresh_minutes: int = Field(default=15)
+    universe_sync_pages: int = Field(default=15, description="pages of 100 markets per sync")
 
-    # WebSocket Settings
-    ws_reconnect_delay: float = Field(
-        default=1.0,
-        description="Initial WebSocket reconnection delay (seconds)",
+    # Theta scanner
+    theta_interval_minutes: int = Field(default=15)
+    theta_ask_min: float = Field(default=0.93)
+    theta_ask_max: float = Field(default=0.985)
+    theta_max_days: float = Field(default=45.0)
+    theta_min_days: float = Field(
+        default=0.75,
+        description="floor in days — intraday sports/crypto are calibrated (no edge) and annualization is meaningless there",
     )
-    ws_max_reconnect_delay: float = Field(
-        default=60.0,
-        description="Maximum WebSocket reconnection delay (seconds)",
+    theta_hurdle_annualized: float = Field(default=0.12)
+    # research: short-horizon weather + entertainment domains are OVERCONFIDENT
+    # (theta negative-EV there); our tag map canonicalizes entertainment -> "culture"
+    theta_excluded_categories: list[str] = Field(default=["weather", "culture", "mentions"])
+    theta_book_refine_top_n: int = Field(default=30)
+    usdc_benchmark_apy: float = Field(default=0.045)
+
+    # Fee fallbacks (feeSchedule.rate on the market itself is authoritative;
+    # this map is only used when the market carries no fee fields)
+    category_fee_rates: dict[str, float] = Field(
+        default={
+            "crypto": 0.07,
+            "sports": 0.05,
+            "economics": 0.05,
+            "culture": 0.05,
+            "weather": 0.05,
+            "politics": 0.04,
+            "finance": 0.04,
+            "tech": 0.04,
+            "mentions": 0.04,
+            "geopolitics": 0.0,
+        }
     )
-    ws_ping_interval: float = Field(
-        default=20.0,
-        description="WebSocket ping interval (seconds)",
-    )
+    default_fee_rate: float = Field(default=0.05)
+
+    # News-fade scanner
+    fade_spike_pp: float = Field(default=0.12)
+    fade_window_minutes: int = Field(default=30)
+    fade_min_liquidity: float = Field(default=25000.0)
+    fade_excluded_categories: list[str] = Field(default=["crypto"])
+    fade_near_end_exclusion_hours: float = Field(default=48.0)
+    fade_retrace_low: float = Field(default=0.50)
+    fade_retrace_high: float = Field(default=0.618)
+    fade_entry_validity_hours: float = Field(default=2.0)
+    fade_time_stop_hours: float = Field(default=24.0)
+    fade_toast_pp: float = Field(default=0.15)
+    fade_toast_min_liquidity: float = Field(default=100000.0)
+
+    # Calendar scanner
+    calendar_interval_minutes: int = Field(default=60)
+
+    # Paper trading
+    paper_default_notional: float = Field(default=100.0)
+    risk_max_position_per_market: float = Field(default=500.0)
+    risk_max_open_per_strategy: int = Field(default=25)
+    risk_max_daily_loss: float = Field(default=250.0)
+
+    # WebSocket
+    ws_reconnect_delay: float = Field(default=1.0)
+    ws_max_reconnect_delay: float = Field(default=60.0)
+    ws_assets_per_connection: int = Field(default=400)
+    ws_app_ping_seconds: float = Field(default=10.0)
+    ws_stale_seconds: float = Field(default=60.0)
+
+    # Bars / retention
+    bar_retention_days: int = Field(default=14)
+    scanner_run_retention: int = Field(default=500)
+
+    # Notifications
+    notify_theta_min_grade: str = Field(default="A")
+    notify_theta_min_annualized: float = Field(default=0.15)
+    notify_max_toasts_per_hour: int = Field(default=6)
 
 
 @lru_cache

@@ -5,7 +5,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
+from typing import Any, Callable, Coroutine, Dict, List, Optional
+
+from core.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
 
@@ -13,30 +15,18 @@ logger = logging.getLogger(__name__)
 class EventType(str, Enum):
     """Types of events in the system."""
 
-    # Price events
-    PRICE_UPDATE = "price_update"
-    PRICE_CHANGE = "price_change"
+    # Stream events (from data/stream.py)
+    BOOK_TOP = "book_top"  # {asset_id, market_id?, bid, ask, mid, ts}
+    TRADE_TICK = "trade_tick"  # {asset_id, price, size, side, ts}
 
-    # Volume events
-    VOLUME_UPDATE = "volume_update"
-    VOLUME_SPIKE = "volume_spike"
-
-    # Trade events
-    TRADE = "trade"
-    WHALE_TRADE = "whale_trade"
-
-    # Market events
-    MARKET_UPDATE = "market_update"
-    MARKET_TRENDING = "market_trending"
+    # Signal / execution events
+    SIGNAL_CREATED = "signal_created"
+    SIGNAL_UPDATED = "signal_updated"
+    POSITION_UPDATED = "position_updated"
 
     # Alert events
     ALERT_CREATED = "alert_created"
     ALERT_ACKNOWLEDGED = "alert_acknowledged"
-
-    # System events
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
-    ERROR = "error"
 
 
 @dataclass
@@ -45,7 +35,7 @@ class Event:
 
     type: EventType
     data: Any
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=utcnow)
     source: Optional[str] = None
 
 

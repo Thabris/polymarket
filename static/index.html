@@ -181,8 +181,10 @@
             }
         }
     </style>
+    <link rel="stylesheet" href="/static/assets/style.css">
 </head>
 <body>
+<script src="/static/assets/nav.js" data-active="rankings"></script>
     <div class="container">
         <nav class="nav" style="margin-bottom: 20px;">
             <a href="/whales" style="color: #a371f7; text-decoration: none; margin-right: 20px;">🐋 Whale Alerts</a>
@@ -233,7 +235,12 @@
     </div>
 
     <script>
-        const API_BASE = 'http://127.0.0.1:8000/api';
+        const API_BASE = '/api';
+        function esc(s) {
+            const d = document.createElement('div');
+            d.textContent = s == null ? '' : String(s);
+            return d.innerHTML.replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+        }
         let previousRankings = {};
         let previousVolumes = {};
         let autoRefreshInterval = null;
@@ -334,7 +341,7 @@
                     const volumeChange = formatVolumeChange(market.volume_24h, previousVolumes[market.id]);
 
                     const marketUrl = market.slug
-                        ? `https://polymarket.com/event/${market.slug}`
+                        ? `https://polymarket.com/event/${encodeURIComponent(market.slug)}`
                         : `https://polymarket.com`;
 
                     html += `
@@ -342,8 +349,8 @@
                             <td class="rank">#${rank}</td>
                             <td class="rank-change">${rankChange}</td>
                             <td class="question">
-                                <a href="${marketUrl}" target="_blank">
-                                    ${market.question}
+                                <a href="${esc(marketUrl)}" target="_blank" rel="noopener">
+                                    ${esc(market.question)}
                                 </a>
                             </td>
                             <td class="price">${formatPrice(market.price_yes)}</td>

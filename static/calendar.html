@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Calendar — Polymarket Scanner</title>
+    <link rel="stylesheet" href="/static/assets/style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Deadline Families</h1>
+    <div class="subtitle">
+        Cumulative "by date" tranches of the same event. The gap p(far) − p(near) prices the window;
+        the conditional column is P(event in window | not yet). Flagging a window creates a manual
+        signal on the far tranche (long-window trade = buy far-YES + buy near-NO; the near leg is
+        yours to pair). <span class="chip mismatch">MISMATCH</span> = tranche descriptions differ in
+        resolution-relevant wording — the MicroStrategy May-31 failure mode; treat the pair as
+        non-fungible.
+    </div>
+    <div class="controls">
+        <button id="refresh">Refresh</button>
+        <span class="muted" id="count"></span>
+    </div>
+    <div id="list"></div>
+</div>
+
+<script src="/static/assets/nav.js" data-active="calendar"></script>
+<script>
+const API = "/api";
+
+function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function fmtP(x) { return x == null ? "—" : Number(x).toFixed(3); }
+function fmtPct(x) { return x == null ? "—" : (x * 100).toFixed(1) + "%"; }
+function fmtDate(d) {
+    if (!d) return "—";
+    return new Date(d + (String(d).endsWith("Z") ? "" : "Z")).toLocaleDateString();
+}
+
+async function flagWindow(marketId, note) {
+    const res = await fetch(`${API}/signals/manual`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ market_id: String(marketId), side: "buy_yes", note }),
+    });
+    if (res.ok) {
+        alert("Window flagged — manual signal created (see Signals page).");
+    } else {
+        alert("Flag failed: " + (await res.text()));
+    }
+}
+
+function familyCard(f) {
+    const tr = f.tranches.map(t => `
+        <tr>
+            <td><a class="mkt-link" target="_blank" rel="noopener"
+                   href="https://polymarket.com/event/${encodeURIComponent(t.event_slug || "")}">${esc(t.question)}</a></td>
+            <td>${fmtDate(t.deadline)}</td>
+            <td>${fmtP(t.bid)}</td>
+            <td>${fmtP(t.ask)}</td>
+            <td>${fmtP(t.mid)}</td>
+            <td>${t.liquidity == null ? "—" : "$" + Math.round(t.liquidity).toLocaleString()}</td>
+        </tr>`).join("");
+
+    const pr = f.pairs.map(p => {
+        const simChip = p.similarity === "MISMATCH"
+            ? `<span class="chip mismatch">MISMATCH</span>`
+            : `<span class="chip strategy">${esc(p.similarity)}</span>`;
+        const viol = p.monotonicity_violation
+            ? `<span class="chip grade-A">VIOLATION</span>` : "";
+        return `<tr>
+            <td>${fmtDate(p.near_deadline)} → ${fmtDate(p.far_deadline)}</td>
+            <td>${fmtPct(p.implied_window)}</td>
+            <td>${fmtPct(p.conditional_hazard)}</td>
+            <td>${simChip} ${viol}</td>
+            <td><button class="flag-btn" data-market-id="${esc(String(p.far_market_id))}"
+                data-note="flag-window: ${esc(fmtDate(p.near_deadline))} → ${esc(fmtDate(p.far_deadline))}, implied ${esc(fmtPct(p.implied_window))}">
+                Flag window</button></td>
+        </tr>`;
+    }).join("");
+
+    return `<div class="card">
+        <div style="font-size:1.02rem; margin-bottom:10px;">${esc(f.title)}</div>
+        <table class="tbl">
+            <thead><tr><th>Tranche</th><th>Deadline</th><th>Bid</th><th>Ask</th><th>Mid</th><th>Liquidity</th></tr></thead>
+            <tbody>${tr}</tbody>
+        </table>
+        ${f.pairs.length ? `
+        <table class="tbl" style="margin-top:12px;">
+            <thead><tr><th>Window</th><th>Implied P(window)</th><th>Conditional</th><th>Fungibility</th><th></th></tr></thead>
+            <tbody>${pr}</tbody>
+        </table>` : ""}
+    </div>`;
+}
+
+async function load() {
+    const res = await fetch(`${API}/families`);
+    const families = await res.json();
+    document.getElementById("count").textContent = `${families.length} families`;
+    document.getElementById("list").innerHTML = families.length
+        ? families.map(familyCard).join("")
+        : `<div class="empty">No deadline families discovered yet — the calendar scanner runs hourly.</div>`;
+}
+
+// delegated listener: no inline JS built from interpolated strings
+document.getElementById("list").addEventListener("click", (e) => {
+    const btn = e.target.closest(".flag-btn");
+    if (btn) flagWindow(btn.dataset.marketId, btn.dataset.note);
+});
+document.getElementById("refresh").onclick = load;
+load();
+setInterval(load, 120000);
+</script>
+</body>
+</html>

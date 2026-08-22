@@ -1,8 +1,6 @@
-"""Data layer module for Polymarket Monitor."""
+"""Data layer for the Polymarket scanner platform."""
 
-from .polymarket_client import PolymarketClient
 from .gamma_client import GammaClient
-from .websocket_manager import WebSocketManager
 from .storage import Database
 
-__all__ = ["PolymarketClient", "GammaClient", "WebSocketManager", "Database"]
+__all__ = ["GammaClient", "Database"]

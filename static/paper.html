@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Paper Book — Polymarket Scanner</title>
+    <link rel="stylesheet" href="/static/assets/style.css">
+</head>
+<body>
+<div class="container">
+    <h1>Paper Book</h1>
+    <div class="subtitle">
+        Every signal auto-tracked as a hypothetical position (fees and spreads modeled) to market
+        resolution. Calibration = entry-price decile vs realized win frequency — the out-of-sample
+        test the research lacks. Real fills you marked are tracked separately.
+    </div>
+
+    <div id="stats" class="stat-row"></div>
+    <div id="strategies"></div>
+
+    <h1 style="font-size:1.3rem; margin-top:28px;">Open positions</h1>
+    <div class="tblwrap-like"><table class="tbl" id="open-tbl">
+        <thead><tr><th>#</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Size</th><th>Fees</th><th>Opened</th></tr></thead>
+        <tbody></tbody>
+    </table></div>
+
+    <h1 style="font-size:1.3rem; margin-top:28px;">Closed positions</h1>
+    <table class="tbl" id="closed-tbl">
+        <thead><tr><th>#</th><th>Strategy</th><th>Side</th><th>Entry</th><th>Exit</th><th>Reason</th><th>P&amp;L</th></tr></thead>
+        <tbody></tbody>
+    </table>
+
+    <h1 style="font-size:1.3rem; margin-top:28px;">Real fills</h1>
+    <table class="tbl" id="fills-tbl">
+        <thead><tr><th>#</th><th>Signal</th><th>Side</th><th>Price</th><th>Size</th><th>Status</th><th>P&amp;L</th><th>Note</th></tr></thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<script src="/static/assets/nav.js" data-active="paper"></script>
+<script>
+const API = "/api";
+
+function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function fmtP(x) { return x == null ? "—" : Number(x).toFixed(3); }
+function money(x) {
+    if (x == null) return "—";
+    const cls = x >= 0 ? "pos" : "neg";
+    return `<span class="${cls}">${x >= 0 ? "+" : ""}$${x.toFixed(2)}</span>`;
+}
+function pct(x) { return x == null ? "—" : (x * 100).toFixed(1) + "%"; }
+function fmtDate(d) {
+    if (!d) return "—";
+    return new Date(d + (String(d).endsWith("Z") ? "" : "Z")).toLocaleString();
+}
+
+function calTable(cal) {
+    const deciles = Object.keys(cal).sort((a, b) => a - b);
+    if (!deciles.length) return "<span class='muted'>no resolved positions yet</span>";
+    return `<table class="tbl" style="max-width:420px;"><thead>
+        <tr><th>Entry decile</th><th>N</th><th>Win freq</th></tr></thead><tbody>` +
+        deciles.map(d => {
+            const c = cal[d];
+            return `<tr><td>${(d * 10)}–${(Number(d) + 1) * 10}¢</td><td>${c.n}</td><td>${pct(c.wins / c.n)}</td></tr>`;
+        }).join("") + "</tbody></table>";
+}
+
+async function load() {
+    const [statsRes, openRes, closedRes, fillsRes] = await Promise.all([
+        fetch(`${API}/paper/stats`),
+        fetch(`${API}/paper/positions?status=open&limit=200`),
+        fetch(`${API}/paper/positions?status=closed&limit=200`),
+        fetch(`${API}/paper/fills`),
+    ]);
+    const stats = statsRes.ok ? await statsRes.json() : { strategies: {}, real_fills: {} };
+    const open = await openRes.json();
+    const closed = await closedRes.json();
+    const fills = await fillsRes.json();
+
+    const totalPnl = Object.values(stats.strategies).reduce((a, s) => a + (s.total_pnl || 0), 0);
+    const openCount = Object.values(stats.strategies).reduce((a, s) => a + s.open_positions, 0);
+    document.getElementById("stats").innerHTML = `
+        <div class="stat-card"><div class="label">Total paper P&amp;L</div><div class="value">${money(totalPnl)}</div></div>
+        <div class="stat-card"><div class="label">Open positions</div><div class="value">${openCount}</div></div>
+        <div class="stat-card"><div class="label">Real fills P&amp;L</div><div class="value">${money(stats.real_fills.total_pnl)}</div></div>`;
+
+    document.getElementById("strategies").innerHTML = Object.entries(stats.strategies).map(([name, s]) => `
+        <div class="card">
+            <div style="display:flex; gap:12px; align-items:baseline; flex-wrap:wrap;">
+                <span class="chip strategy">${esc(name)}</span>
+                <span>P&amp;L ${money(s.total_pnl)}</span>
+                <span class="muted">win rate ${pct(s.win_rate)}</span>
+                <span class="muted">fill rate ${pct(s.fill_rate)}</span>
+                <span class="muted">${s.signals_emitted} signals · ${s.open_positions} open · ${s.closed_positions} closed</span>
+            </div>
+            <div style="margin-top:10px;">${calTable(s.calibration)}</div>
+        </div>`).join("") || `<div class="empty">No strategy data yet.</div>`;
+
+    document.querySelector("#open-tbl tbody").innerHTML = open.map(p => `
+        <tr><td>${p.id}</td><td>${esc(p.strategy)}</td><td>${esc(p.side)}</td>
+        <td>${fmtP(p.entry_price)}</td><td>${p.size.toFixed(0)}</td>
+        <td>$${p.fees_paid.toFixed(2)}</td><td>${fmtDate(p.opened_at)}</td></tr>`).join("")
+        || `<tr><td colspan="7" class="empty">none</td></tr>`;
+
+    document.querySelector("#closed-tbl tbody").innerHTML = closed.map(p => `
+        <tr><td>${p.id}</td><td>${esc(p.strategy)}</td><td>${esc(p.side)}</td>
+        <td>${fmtP(p.entry_price)}</td><td>${fmtP(p.exit_price)}</td>
+        <td>${esc(p.exit_reason || "")}</td><td>${money(p.pnl)}</td></tr>`).join("")
+        || `<tr><td colspan="7" class="empty">none</td></tr>`;
+
+    document.querySelector("#fills-tbl tbody").innerHTML = fills.map(f => `
+        <tr><td>${f.id}</td><td>#${f.signal_id}</td><td>${esc(f.side)}</td>
+        <td>${fmtP(f.price)}</td><td>${f.size}</td><td>${esc(f.status)}</td>
+        <td>${money(f.pnl)}</td><td class="muted">${esc(f.note || "")}</td></tr>`).join("")
+        || `<tr><td colspan="8" class="empty">none — mark signals as traded from the Signals page</td></tr>`;
+}
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

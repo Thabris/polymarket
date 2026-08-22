@@ -1,157 +1,83 @@
-# Polymarket Monitor
+# Polymarket Scanner
 
-A Python-based platform to monitor Polymarket betting markets, detect significant events (large inflows, odds changes, popular bets), and deliver real-time alerts.
+A strategy-scanner platform for Polymarket prediction markets. Three scanners
+emit **signals** (never orders) into a paper-trading pipeline that tracks every
+signal to market resolution — building the out-of-sample track record that
+decides whether automated execution is ever worth turning on.
 
-## Features
+## Strategies
 
-### Phase 1: Monitoring & Alerts (Current)
-- **Real-time price monitoring** via WebSocket connection
-- **Volume spike detection** - alerts when trading volume exceeds thresholds
-- **Whale activity tracking** - alerts on large individual trades
-- **Price change alerts** - notifications when odds move significantly
-- **Desktop notifications** (Windows toast)
-- **REST API** for data access
-- **WebSocket streaming** for real-time data
-- **System tray** integration for easy control
+| Scanner | Cadence | What it looks for |
+|---|---|---|
+| **theta** | 15 min (REST) | Near-certain contracts (93–98.5¢) with clean resolution wording, net annualized yield above a hurdle after the market's own fee schedule. Excludes weather/entertainment (research: overconfident domains) and intraday junk. |
+| **news_fade** | real-time (WebSocket) | ≥12pp price spikes within 30 min on liquid, non-crypto markets away from resolution. Emits fade *candidates* with a maker entry zone — the resolving-vs-noise judgment stays with you. |
+| **calendar** | 60 min (REST) | Deadline-tranche families ("by Aug 31" / "by Sep 30"). Computes implied windows + conditional hazards for browsing; signals only on genuine fee-adjusted monotonicity violations. Handles survival ("continues through") semantics; flags resolution-text mismatches between tranches. |
 
-### Phase 2: Trading Strategies (Future)
-- Strategy framework with backtesting
-- Automated order execution
-- Position management
+Signal grades: **A/B** enter the paper book automatically; **C** (subjective
+resolution wording, UMA disputes, tranche mismatches) is displayed but never
+papered or toasted.
 
-## Quick Start
+## Run
 
-### 1. Install Dependencies
-
-```bash
-cd polymarket
+```powershell
 pip install -r requirements.txt
+python main.py            # migrations run automatically; Ctrl+C to stop
 ```
 
-### 2. Configure Credentials
+- Dashboard: http://127.0.0.1:8000/static/signals.html (Signals · Calendar · Paper Book · Rankings)
+- API docs: http://127.0.0.1:8000/docs — status: `/api/status`, scanner runs: `/api/scanners/status`
+- Windows toasts fire for: grade-A theta ≥15% annualized, ≥15pp fades on ≥$100k
+  liquidity, and every calendar arb (max 6/hour; everything always reaches the dashboard).
 
-Option A: Use environment variables (development)
-```bash
-copy .env.example .env
-# Edit .env with your credentials
-```
+`python main.py --api-only` runs just the API + market sync (UI development).
 
-Option B: Use Windows Credential Manager (secure)
-```bash
-python scripts/setup_credentials.py
-```
-
-### 3. Initialize Database
-
-```bash
-# Run migrations
-alembic upgrade head
-```
-
-### 4. Run the Application
-
-```bash
-python main.py
-```
-
-The application will start:
-- API server at http://127.0.0.1:8000
-- API documentation at http://127.0.0.1:8000/docs
-- System tray icon for quick control
-
-## Command Line Options
-
-```bash
-python main.py              # Full application
-python main.py --api-only   # API server only
-python main.py --no-tray    # Without system tray
-python main.py --port 9000  # Custom port
-```
-
-## API Endpoints
-
-### Markets
-- `GET /api/markets` - List markets
-- `GET /api/markets/search?q=bitcoin` - Search markets
-- `GET /api/markets/trending` - Trending markets
-- `GET /api/markets/{id}` - Market details
-- `GET /api/markets/{id}/prices` - Price history
-
-### Alerts
-- `GET /api/alerts` - List alerts
-- `GET /api/alerts/unread` - Unread alerts
-- `POST /api/alerts/{id}/acknowledge` - Acknowledge alert
-- `GET /api/alerts/config` - Get alert thresholds
-- `PUT /api/alerts/config` - Update thresholds
-
-### Watchlist
-- `GET /api/markets/watchlist` - Get watchlist
-- `POST /api/markets/watchlist` - Add to watchlist
-- `DELETE /api/markets/watchlist/{id}` - Remove from watchlist
-
-### WebSocket
-- `WS /ws/stream` - Real-time data stream
-
-### System
-- `GET /api/status` - System status
-- `GET /api/health` - Health check
-- `GET /api/settings` - Current settings
+### Always-on
+Task Scheduler → Create Basic Task → "At log on" → Program: `pythonw`,
+arguments: `main.py`, start in: this directory.
 
 ## Configuration
 
-### Alert Thresholds
+Everything is env-overridable via `.env` (see `config/settings.py` for the
+full list): scan thresholds, fee fallbacks, universe size, toast policy,
+paper notional, risk caps. Fee truth comes from each market's own
+`feeSchedule`; the category map is only a fallback.
 
-Edit via API or set in `.env`:
+## Paper book & real fills
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| PRICE_CHANGE_THRESHOLD_PCT | 5.0 | Price change % to trigger alert |
-| PRICE_CHANGE_WINDOW_MINUTES | 5 | Time window for price detection |
-| VOLUME_SPIKE_THRESHOLD_USD | 10000 | Volume in USD to trigger alert |
-| VOLUME_SPIKE_WINDOW_MINUTES | 5 | Time window for volume detection |
-| WHALE_TRADE_THRESHOLD_USD | 5000 | Single trade size for whale alert |
+Every A/B signal opens a hypothetical position: theta/calendar fill at the
+executable ask + taker fee; fades fill only if price actually touches the
+suggested maker zone within its validity window (fee-free maker fill).
+Positions close on resolution (1.0/0.0), news-fade time stop (24h), and
+"closed but ambiguous" markets are left open and flagged — never guessed.
+Mark a signal you actually traded via **Mark traded** on the Signals page;
+real fills are tracked separately from paper.
 
-## Project Structure
+## Architecture
 
 ```
-polymarket/
-├── api/                 # FastAPI application
-├── config/              # Settings and credentials
-├── core/                # Core models and events
-├── data/                # API clients and storage
-├── db/                  # Database models and migrations
-├── monitors/            # Alert monitors
-├── notifications/       # Notification delivery
-├── scripts/             # Setup scripts
-├── strategies/          # Trading strategies (Phase 2)
-├── tests/               # Test suite
-├── ui/                  # System tray
-└── main.py              # Entry point
+Gamma REST  ─→ UniverseManager ─→ markets/events tables (15-min sync)
+CLOB WS     ─→ MarketStream ─→ EventBus ─→ BarRecorder → prices (1-min bars)
+                                        └→ NewsFadeScanner
+Theta/Calendar scanners (REST) ─→ SignalService ─→ signals table
+                                        ├→ toasts (winotify) + browser WS
+                                        └→ ExecutionRouter (ABC)
+                                             └→ PaperRouter → paper_positions
+                                             └→ [future LiveRouter — same seam]
 ```
+
+Execution-readiness: scanners → `SignalService` → `ExecutionRouter` is the
+only path to fills. A future `LiveRouter` (py-clob-client) implements the
+same interface with the same `RiskLimits` — nothing else changes.
 
 ## Development
 
-### Running Tests
-
-```bash
-pip install -r requirements-dev.txt
-pytest
+```powershell
+python -m pytest -q                      # unit + fixture tests
+python scripts/probe_gamma.py            # refresh API-contract fixtures
+python scripts/probe_ws.py --seconds 60  # refresh WS capture
+python scripts/emit_test_signal.py       # inject a synthetic signal (daemon must run)
+python scripts/toast_test.py             # toast smoke test
 ```
 
-### Code Formatting
-
-```bash
-black .
-ruff check .
-```
-
-## Security Notes
-
-- Never commit `.env` file or credentials
-- Use `keyring` for production credential storage
-- API keys are stored in Windows Credential Manager
-- Private keys are required only for trading (Phase 2)
-
-## License
-
-MIT
+Schema changes go through Alembic (`db/migrations`); `create_all` is
+test-only. DB lives at `var/polymarket.db` (WAL); logs at `var/daemon.log`.

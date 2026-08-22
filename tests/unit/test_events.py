@@ -19,10 +19,10 @@ class TestEventBus:
         async def handler(event: Event):
             received.append(event)
 
-        bus.subscribe(EventType.PRICE_UPDATE, handler)
+        bus.subscribe(EventType.BOOK_TOP, handler)
         await bus.start()
 
-        event = Event(type=EventType.PRICE_UPDATE, data={"price": 0.5})
+        event = Event(type=EventType.BOOK_TOP, data={"price": 0.5})
         await bus.emit(event)
 
         # Wait for processing
@@ -31,7 +31,7 @@ class TestEventBus:
         await bus.stop()
 
         assert len(received) == 1
-        assert received[0].type == EventType.PRICE_UPDATE
+        assert received[0].type == EventType.BOOK_TOP
 
     @pytest.mark.asyncio
     async def test_unsubscribe(self):
@@ -42,12 +42,12 @@ class TestEventBus:
         async def handler(event: Event):
             received.append(event)
 
-        bus.subscribe(EventType.PRICE_UPDATE, handler)
-        bus.unsubscribe(EventType.PRICE_UPDATE, handler)
+        bus.subscribe(EventType.BOOK_TOP, handler)
+        bus.unsubscribe(EventType.BOOK_TOP, handler)
 
         await bus.start()
 
-        event = Event(type=EventType.PRICE_UPDATE, data={"price": 0.5})
+        event = Event(type=EventType.BOOK_TOP, data={"price": 0.5})
         await bus.emit(event)
 
         await asyncio.sleep(0.1)
@@ -67,8 +67,8 @@ class TestEventBus:
         bus.subscribe(None, handler)  # Wildcard
         await bus.start()
 
-        await bus.emit(Event(type=EventType.PRICE_UPDATE, data={}))
-        await bus.emit(Event(type=EventType.TRADE, data={}))
+        await bus.emit(Event(type=EventType.BOOK_TOP, data={}))
+        await bus.emit(Event(type=EventType.TRADE_TICK, data={}))
         await bus.emit(Event(type=EventType.ALERT_CREATED, data={}))
 
         await asyncio.sleep(0.1)
@@ -88,12 +88,12 @@ class TestEventBus:
         async def working_handler(event: Event):
             received.append(event)
 
-        bus.subscribe(EventType.PRICE_UPDATE, failing_handler)
-        bus.subscribe(EventType.PRICE_UPDATE, working_handler)
+        bus.subscribe(EventType.BOOK_TOP, failing_handler)
+        bus.subscribe(EventType.BOOK_TOP, working_handler)
 
         await bus.start()
 
-        event = Event(type=EventType.PRICE_UPDATE, data={})
+        event = Event(type=EventType.BOOK_TOP, data={})
         await bus.emit(event)
 
         await asyncio.sleep(0.1)

@@ -16,12 +16,13 @@ class SettingsResponse(BaseModel):
     api_host: str
     api_port: int
 
-    # Alert Thresholds (from settings)
-    price_change_threshold_pct: float
-    price_change_window_minutes: int
-    volume_spike_threshold_usd: float
-    volume_spike_window_minutes: int
-    whale_trade_threshold_usd: float
+    # Scanner settings (read-only view)
+    theta_interval_minutes: int
+    theta_hurdle_annualized: float
+    fade_spike_pp: float
+    calendar_interval_minutes: int
+    stream_universe_size: int
+    paper_default_notional: float
 
     # Connection Status
     has_api_credentials: bool
@@ -41,11 +42,12 @@ async def get_settings():
     return SettingsResponse(
         api_host=settings.api_host,
         api_port=settings.api_port,
-        price_change_threshold_pct=settings.price_change_threshold_pct,
-        price_change_window_minutes=settings.price_change_window_minutes,
-        volume_spike_threshold_usd=settings.volume_spike_threshold_usd,
-        volume_spike_window_minutes=settings.volume_spike_window_minutes,
-        whale_trade_threshold_usd=settings.whale_trade_threshold_usd,
+        theta_interval_minutes=settings.theta_interval_minutes,
+        theta_hurdle_annualized=settings.theta_hurdle_annualized,
+        fade_spike_pp=settings.fade_spike_pp,
+        calendar_interval_minutes=settings.calendar_interval_minutes,
+        stream_universe_size=settings.stream_universe_size,
+        paper_default_notional=settings.paper_default_notional,
         has_api_credentials=has_credentials(),
         has_trading_credentials=has_trading_credentials(),
         polymarket_clob_url=settings.polymarket_clob_url,

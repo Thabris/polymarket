@@ -1,17 +1,6 @@
-"""Core module for Polymarket Monitor."""
+"""Core module for the Polymarket scanner platform."""
 
-from .events import EventBus, Event
-from .models import Market, Price, Alert, Trade
-from .exceptions import PolymarketError, ConnectionError, AuthenticationError
+from .events import Event, EventBus
+from .models import Alert, Market, Price
 
-__all__ = [
-    "EventBus",
-    "Event",
-    "Market",
-    "Price",
-    "Alert",
-    "Trade",
-    "PolymarketError",
-    "ConnectionError",
-    "AuthenticationError",
-]
+__all__ = ["EventBus", "Event", "Market", "Price", "Alert"]

@@ -1,24 +1,126 @@
-"""Client for Polymarket Gamma API (market metadata)."""
+"""Client for the Polymarket Gamma API (market/event metadata).
 
+Field shapes are grounded in recorded fixtures (tests/fixtures/gamma_*.json,
+captured Aug 2026). Notable realities:
+- `category` is no longer populated; tags live only on the /events endpoint.
+- `clobTokenIds`, `outcomePrices`, `outcomes` arrive as JSON-encoded strings.
+- `feeSchedule` ({"rate": 0.05, ...}) + `feesEnabled` on the market are the
+  authoritative fee source; `feesEnabled: false` means fee-free.
+- Resolved markets: `closed: true`, `umaResolutionStatus: "resolved"`,
+  `outcomePrices` like ["1", "0"]; `closedTime` uses "YYYY-MM-DD HH:MM:SS+00".
+- Markets embed `events[]` with id/slug/title/negRisk for family grouping.
+"""
+
+import asyncio
 import json
 import logging
-from datetime import datetime
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 import httpx
 
 from config.settings import settings
 from core.models import Market
+from core.timeutil import parse_dt
 
 logger = logging.getLogger(__name__)
 
 
-class GammaClient:
-    """
-    Client for Polymarket Gamma API.
+def _as_list(value) -> list:
+    """Gamma encodes some array fields as JSON strings."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return []
+    return value if isinstance(value, list) else []
 
-    Provides market metadata, search, and discovery features.
-    """
+
+def _as_float(value) -> Optional[float]:
+    if value is None or value == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def parse_market(data: dict) -> Market:
+    """Parse a raw Gamma market dict into the domain model."""
+    token_ids = [str(t) for t in _as_list(data.get("clobTokenIds"))]
+    outcome_prices = [_as_float(p) for p in _as_list(data.get("outcomePrices"))]
+    outcomes = [str(o) for o in _as_list(data.get("outcomes"))]
+
+    events = data.get("events") or []
+    event = events[0] if isinstance(events, list) and events else {}
+
+    fee_schedule = data.get("feeSchedule") or {}
+    fees_enabled = bool(data.get("feesEnabled"))
+    fee_rate = _as_float(fee_schedule.get("rate")) if fees_enabled else 0.0
+
+    # Resolved outcome: index whose price settled at 1
+    resolved_outcome = None
+    if data.get("closed") and outcome_prices:
+        for i, p in enumerate(outcome_prices):
+            if p is not None and p >= 0.999:
+                resolved_outcome = str(i)
+                break
+
+    return Market(
+        id=str(data.get("id", "")),
+        condition_id=data.get("conditionId", "") or "",
+        question=data.get("question", "") or "",
+        description=data.get("description"),
+        category=data.get("category"),
+        slug=data.get("slug"),
+        end_date=parse_dt(data.get("endDate")),
+        start_date=parse_dt(data.get("startDate")),
+        active=bool(data.get("active", True)),
+        closed=bool(data.get("closed", False)),
+        accepting_orders=bool(data.get("acceptingOrders", True)),
+        token_id_yes=token_ids[0] if len(token_ids) > 0 else None,
+        token_id_no=token_ids[1] if len(token_ids) > 1 else None,
+        outcomes=outcomes or None,
+        price_yes=outcome_prices[0] if len(outcome_prices) > 0 else None,
+        price_no=outcome_prices[1] if len(outcome_prices) > 1 else None,
+        best_bid=_as_float(data.get("bestBid")),
+        best_ask=_as_float(data.get("bestAsk")),
+        spread=_as_float(data.get("spread")),
+        last_trade_price=_as_float(data.get("lastTradePrice")),
+        one_day_price_change=_as_float(data.get("oneDayPriceChange")),
+        tick_size=_as_float(data.get("orderPriceMinTickSize")),
+        volume_24h=_as_float(data.get("volume24hr")),
+        liquidity=_as_float(data.get("liquidityNum") or data.get("liquidity")),
+        event_id=str(event.get("id")) if event.get("id") else None,
+        event_slug=event.get("slug"),
+        group_item_title=data.get("groupItemTitle"),
+        neg_risk=bool(data.get("negRisk", False)),
+        neg_risk_market_id=data.get("negRiskMarketID"),
+        fees_enabled=fees_enabled,
+        fee_rate=fee_rate,
+        fee_type=data.get("feeType"),
+        resolution_source=data.get("resolutionSource"),
+        uma_resolution_status=data.get("umaResolutionStatus"),
+        resolved_outcome=resolved_outcome,
+        closed_time=parse_dt(data.get("closedTime")),
+        last_synced_at=None,
+    )
+
+
+def parse_event_tags(event: dict) -> list[str]:
+    """Extract tag labels from an /events-endpoint event."""
+    labels = []
+    for t in event.get("tags") or []:
+        if isinstance(t, dict) and t.get("label"):
+            labels.append(t["label"])
+        elif isinstance(t, str):
+            labels.append(t)
+    return labels
+
+
+class GammaClient:
+    """Async client for the Polymarket Gamma API."""
 
     def __init__(self, base_url: Optional[str] = None):
         self.base_url = base_url or settings.polymarket_gamma_url
@@ -31,18 +133,10 @@ class GammaClient:
             timeout=httpx.Timeout(30.0, connect=10.0),
             headers={
                 "Accept": "application/json",
-                "User-Agent": "PolymarketMonitor/1.0",
+                "User-Agent": "PolymarketScanner/1.0",
             },
             follow_redirects=True,
         )
-
-        # Test connection
-        try:
-            response = await self._client.get("/markets", params={"limit": 1})
-            response.raise_for_status()
-            logger.info(f"Gamma API connection verified: {self.base_url}")
-        except Exception as e:
-            logger.warning(f"Gamma API connection test failed: {e}")
 
     async def close(self) -> None:
         """Close the HTTP client."""
@@ -52,7 +146,6 @@ class GammaClient:
 
     @property
     def client(self) -> httpx.AsyncClient:
-        """Get the HTTP client, initializing if needed."""
         if self._client is None:
             raise RuntimeError("Client not connected. Call connect() first.")
         return self._client
@@ -61,247 +154,113 @@ class GammaClient:
         self,
         limit: int = 100,
         offset: int = 0,
-        active: bool = True,
-        closed: bool = False,
+        active: Optional[bool] = True,
+        closed: Optional[bool] = False,
+        order: str = "volume24hr",
+        ascending: bool = False,
+        market_ids: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """Fetch one page of raw market dicts."""
+        params: dict = {
+            "limit": limit,
+            "offset": offset,
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if active is not None:
+            params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+        if market_ids:
+            params["id"] = market_ids
+        # HTTP errors PROPAGATE: swallowing them here made iter_markets read a
+        # transient failure as end-of-pagination and silently truncate the sync
+        response = await self.client.get("/markets", params=params)
+        response.raise_for_status()
+        data = response.json()
+        return data if isinstance(data, list) else data.get("data", [])
+
+    async def get_market(self, market_id: str) -> Optional[dict]:
+        """Fetch a single raw market dict by id."""
+        try:
+            response = await self.client.get(f"/markets/{market_id}")
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            logger.error(f"Failed to fetch market {market_id}: {e}")
+            return None
+
+    async def iter_markets(
+        self,
+        max_pages: int = 10,
+        page_size: int = 100,
+        active: Optional[bool] = True,
+        closed: Optional[bool] = False,
+        order: str = "volume24hr",
+        delay_s: float = 0.25,
+    ) -> AsyncIterator[list[dict]]:
+        """Paginate /markets, yielding raw pages until exhausted."""
+        for page in range(max_pages):
+            batch = await self.get_markets(
+                limit=page_size,
+                offset=page * page_size,
+                active=active,
+                closed=closed,
+                order=order,
+            )
+            if not batch:
+                return
+            yield batch
+            if len(batch) < page_size:
+                return
+            await asyncio.sleep(delay_s)
+
+    async def get_events(
+        self,
+        limit: int = 100,
+        offset: int = 0,
+        active: Optional[bool] = True,
+        closed: Optional[bool] = False,
         order: str = "volume24hr",
         ascending: bool = False,
     ) -> list[dict]:
-        """
-        Get a list of markets.
-
-        Args:
-            limit: Maximum number of markets to return
-            offset: Pagination offset
-            active: Include active markets
-            closed: Include closed markets
-            order: Sort field (volume24hr, liquidity, startDate, endDate)
-            ascending: Sort direction
-
-        Returns:
-            List of market data dictionaries
-        """
+        """Fetch one page of raw event dicts (markets nested, tags included)."""
+        params = {
+            "limit": limit,
+            "offset": offset,
+            "order": order,
+            "ascending": str(ascending).lower(),
+        }
+        if active is not None:
+            params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
         try:
-            params = {
-                "limit": limit,
-                "offset": offset,
-                "active": str(active).lower(),
-                "closed": str(closed).lower(),
-                "order": order,
-                "ascending": str(ascending).lower(),
-            }
-
-            response = await self.client.get("/markets", params=params)
-            response.raise_for_status()
-            data = response.json()
-
-            # Handle different response formats
-            if isinstance(data, list):
-                return data
-            elif isinstance(data, dict):
-                # API might wrap results in a data/markets key
-                return data.get("data", data.get("markets", data.get("results", [])))
-            else:
-                logger.warning(f"Unexpected response type: {type(data)}")
-                return []
-
-        except Exception as e:
-            logger.error(f"Failed to get markets: {e}")
-            return []
-
-    async def get_market(self, market_id: str) -> Optional[dict]:
-        """
-        Get a single market by ID.
-
-        Args:
-            market_id: The market/condition ID
-
-        Returns:
-            Market data or None if not found
-        """
-        try:
-            response = await self.client.get(f"/markets/{market_id}")
-            response.raise_for_status()
-            return response.json()
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return None
-            logger.error(f"Failed to get market {market_id}: {e}")
-            return None
-        except Exception as e:
-            logger.error(f"Failed to get market {market_id}: {e}")
-            return None
-
-    async def search_markets(
-        self,
-        query: str,
-        limit: int = 20,
-    ) -> list[dict]:
-        """
-        Search markets by text query.
-
-        Args:
-            query: Search query
-            limit: Maximum results
-
-        Returns:
-            List of matching markets
-        """
-        try:
-            params = {"query": query, "limit": limit}
-            response = await self.client.get("/markets/search", params=params)
-            response.raise_for_status()
-            return response.json()
-
-        except Exception as e:
-            logger.error(f"Failed to search markets: {e}")
-            return []
-
-    async def get_events(self, limit: int = 50) -> list[dict]:
-        """
-        Get events (groups of related markets).
-
-        Args:
-            limit: Maximum events to return
-
-        Returns:
-            List of events
-        """
-        try:
-            params = {"limit": limit}
             response = await self.client.get("/events", params=params)
             response.raise_for_status()
-            return response.json()
-
-        except Exception as e:
-            logger.error(f"Failed to get events: {e}")
+            data = response.json()
+            return data if isinstance(data, list) else data.get("data", [])
+        except httpx.HTTPError as e:
+            logger.error(f"Failed to fetch events (offset={offset}): {e}")
             return []
 
-    async def get_trending(self, limit: int = 20) -> list[dict]:
-        """
-        Get trending/popular markets.
-
-        Args:
-            limit: Maximum markets to return
-
-        Returns:
-            List of trending markets
-        """
-        # Trending = high volume in recent period
-        return await self.get_markets(
-            limit=limit,
-            order="volume24hr",
-            ascending=False,
-        )
-
-    def parse_market(self, data: dict) -> Market:
-        """
-        Parse API response into Market model.
-
-        Args:
-            data: Raw API response
-
-        Returns:
-            Market model instance
-        """
-        # Parse end date
-        end_date = None
-        if data.get("endDate"):
-            try:
-                end_date = datetime.fromisoformat(
-                    data["endDate"].replace("Z", "+00:00")
-                )
-            except (ValueError, TypeError):
-                pass
-
-        # Get token IDs from clobTokenIds (JSON string or list)
-        clob_tokens = data.get("clobTokenIds", [])
-        if isinstance(clob_tokens, str):
-            try:
-                clob_tokens = json.loads(clob_tokens)
-            except (json.JSONDecodeError, TypeError):
-                clob_tokens = []
-
-        token_yes = clob_tokens[0] if len(clob_tokens) > 0 else None
-        token_no = clob_tokens[1] if len(clob_tokens) > 1 else None
-
-        # Get prices from outcomePrices (JSON string or list)
-        outcome_prices = data.get("outcomePrices", [])
-        if isinstance(outcome_prices, str):
-            try:
-                outcome_prices = json.loads(outcome_prices)
-            except (json.JSONDecodeError, TypeError):
-                outcome_prices = []
-
-        price_yes = None
-        price_no = None
-
-        if len(outcome_prices) > 0:
-            try:
-                price_yes = float(outcome_prices[0])
-            except (ValueError, TypeError):
-                pass
-        if len(outcome_prices) > 1:
-            try:
-                price_no = float(outcome_prices[1])
-            except (ValueError, TypeError):
-                pass
-
-        # Get volume - try different field names
-        volume = data.get("volumeNum") or data.get("volume24hr") or data.get("volume")
-        if volume and isinstance(volume, str):
-            try:
-                volume = float(volume)
-            except (ValueError, TypeError):
-                volume = None
-
-        # Get liquidity
-        liquidity = data.get("liquidityNum") or data.get("liquidity")
-        if liquidity and isinstance(liquidity, str):
-            try:
-                liquidity = float(liquidity)
-            except (ValueError, TypeError):
-                liquidity = None
-
-        return Market(
-            id=data.get("id", data.get("conditionId", "")),
-            condition_id=data.get("conditionId", data.get("id", "")),
-            question=data.get("question", ""),
-            description=data.get("description"),
-            category=data.get("category"),
-            end_date=end_date,
-            active=data.get("active", True),
-            token_id_yes=token_yes,
-            token_id_no=token_no,
-            price_yes=price_yes,
-            price_no=price_no,
-            volume_24h=volume,
-            liquidity=liquidity,
-        )
-
-    async def sync_markets(self, limit: int = 100) -> list[Market]:
-        """
-        Fetch and parse markets from API.
-
-        Args:
-            limit: Maximum markets to fetch
-
-        Returns:
-            List of Market models
-        """
-        raw_markets = await self.get_markets(limit=limit)
-        markets = []
-        for m in raw_markets:
-            # Skip non-dict items (API sometimes returns strings)
-            if not isinstance(m, dict):
-                logger.debug(f"Skipping non-dict market item: {type(m)}")
-                continue
-            try:
-                markets.append(self.parse_market(m))
-            except Exception as e:
-                logger.debug(f"Failed to parse market: {e}")
-                continue
-        return markets
+    async def iter_events(
+        self,
+        max_pages: int = 10,
+        page_size: int = 100,
+        delay_s: float = 0.25,
+    ) -> AsyncIterator[list[dict]]:
+        """Paginate /events, yielding raw pages until exhausted."""
+        for page in range(max_pages):
+            batch = await self.get_events(limit=page_size, offset=page * page_size)
+            if not batch:
+                return
+            yield batch
+            if len(batch) < page_size:
+                return
+            await asyncio.sleep(delay_s)
 
 
 # Global client instance

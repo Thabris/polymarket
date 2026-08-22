@@ -6,7 +6,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
-from data.gamma_client import gamma_client
+from core.models import Market
+from data.gamma_client import gamma_client, parse_market
 from data.storage import db
 
 router = APIRouter()
@@ -18,19 +19,24 @@ class MarketResponse(BaseModel):
     id: str
     condition_id: str
     slug: Optional[str] = None
+    event_slug: Optional[str] = None
     question: str
     description: Optional[str] = None
     category: Optional[str] = None
     end_date: Optional[datetime] = None
     active: bool = True
+    closed: bool = False
     price_yes: Optional[float] = None
     price_no: Optional[float] = None
+    best_bid: Optional[float] = None
+    best_ask: Optional[float] = None
+    spread: Optional[float] = None
     volume_24h: Optional[float] = None
     liquidity: Optional[float] = None
 
 
 class PriceResponse(BaseModel):
-    """Price candle response model."""
+    """Price bar response model."""
 
     timestamp: datetime
     open: float
@@ -60,136 +66,65 @@ class WatchlistItemResponse(BaseModel):
     created_at: datetime
 
 
+def _to_response(m: Market) -> MarketResponse:
+    return MarketResponse(
+        id=m.id,
+        condition_id=m.condition_id,
+        slug=m.slug,
+        event_slug=m.event_slug,
+        question=m.question,
+        description=m.description,
+        category=m.category,
+        end_date=m.end_date,
+        active=m.active,
+        closed=m.closed,
+        price_yes=m.price_yes,
+        price_no=m.price_no,
+        best_bid=m.best_bid,
+        best_ask=m.best_ask,
+        spread=m.spread,
+        volume_24h=m.volume_24h,
+        liquidity=m.liquidity,
+    )
+
+
+def _parse_page(raw_markets: list) -> list[MarketResponse]:
+    out = []
+    for m in raw_markets:
+        if not isinstance(m, dict):
+            continue
+        try:
+            out.append(_to_response(parse_market(m)))
+        except Exception:
+            continue
+    return out
+
+
 @router.get("", response_model=list[MarketResponse])
 async def list_markets(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     active: bool = Query(default=True),
 ):
-    """
-    List markets from Polymarket.
-
-    Returns markets ordered by 24h volume.
-    """
+    """List markets from Polymarket, ordered by 24h volume."""
     try:
-        markets = await gamma_client.get_markets(
-            limit=limit,
-            offset=offset,
-            active=active,
-        )
-
-        # Handle empty response
-        if not markets:
-            return []
-
-        # Handle case where API returns a wrapper object
-        if isinstance(markets, dict):
-            markets = markets.get("data", markets.get("markets", []))
-
-        result = []
-        for m in markets:
-            if not isinstance(m, dict):
-                continue
-            try:
-                result.append(_parse_market_response(m))
-            except Exception:
-                continue
-
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/search", response_model=list[MarketResponse])
-async def search_markets(
-    q: str = Query(..., min_length=2),
-    limit: int = Query(default=20, ge=1, le=50),
-):
-    """Search markets by text query."""
-    try:
-        markets = await gamma_client.search_markets(query=q, limit=limit)
-
-        result = []
-        for m in markets:
-            if not isinstance(m, dict):
-                continue
-            try:
-                result.append(_parse_market_response(m))
-            except Exception:
-                continue
-        return result
+        markets = await gamma_client.get_markets(limit=limit, offset=offset, active=active)
+        return _parse_page(markets)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/trending", response_model=list[MarketResponse])
-async def get_trending_markets(
-    limit: int = Query(default=20, ge=1, le=50),
-):
+async def get_trending_markets(limit: int = Query(default=20, ge=1, le=50)):
     """Get trending markets by volume."""
     try:
-        markets = await gamma_client.get_trending(limit=limit)
-
-        result = []
-        for m in markets:
-            if not isinstance(m, dict):
-                continue
-            try:
-                result.append(_parse_market_response(m))
-            except Exception:
-                continue
-        return result
+        markets = await gamma_client.get_markets(limit=limit, order="volume24hr")
+        return _parse_page(markets)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get("/{market_id}", response_model=MarketResponse)
-async def get_market(market_id: str):
-    """Get a single market by ID."""
-    try:
-        market = await gamma_client.get_market(market_id)
-        if not market:
-            raise HTTPException(status_code=404, detail="Market not found")
-
-        return _parse_market_response(market)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@router.get("/{market_id}/prices", response_model=list[PriceResponse])
-async def get_market_prices(
-    market_id: str,
-    start: Optional[datetime] = None,
-    end: Optional[datetime] = None,
-    limit: int = Query(default=100, ge=1, le=1000),
-):
-    """Get price history for a market."""
-    try:
-        prices = await db.get_prices(
-            market_id=market_id,
-            start=start,
-            end=end,
-            limit=limit,
-        )
-
-        return [
-            PriceResponse(
-                timestamp=p.timestamp,
-                open=p.open,
-                high=p.high,
-                low=p.low,
-                close=p.close,
-                volume=p.volume,
-            )
-            for p in prices
-        ]
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# Watchlist endpoints
+# Watchlist endpoints — declared BEFORE /{market_id} so they are reachable
 @router.get("/watchlist", response_model=list[WatchlistItemResponse])
 async def get_watchlist():
     """Get the watchlist."""
@@ -220,7 +155,6 @@ async def add_to_watchlist(request: WatchlistItemRequest):
             volume_threshold_usd=request.volume_threshold_usd,
             notes=request.notes,
         )
-
         return WatchlistItemResponse(
             id=item.id,
             market_id=item.market_id,
@@ -247,58 +181,40 @@ async def remove_from_watchlist(market_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-def _parse_market_response(m: dict) -> MarketResponse:
-    """Parse raw market data into MarketResponse."""
-    import json
+@router.get("/{market_id}", response_model=MarketResponse)
+async def get_market(market_id: str):
+    """Get a single market by ID."""
+    try:
+        market = await gamma_client.get_market(market_id)
+        if not market:
+            raise HTTPException(status_code=404, detail="Market not found")
+        return _to_response(parse_market(market))
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
-    # Get prices from outcomePrices (JSON string or list)
-    outcome_prices = m.get("outcomePrices", [])
-    if isinstance(outcome_prices, str):
-        try:
-            outcome_prices = json.loads(outcome_prices)
-        except (json.JSONDecodeError, TypeError):
-            outcome_prices = []
 
-    price_yes = None
-    price_no = None
-    if len(outcome_prices) > 0:
-        try:
-            price_yes = float(outcome_prices[0])
-        except (ValueError, TypeError):
-            pass
-    if len(outcome_prices) > 1:
-        try:
-            price_no = float(outcome_prices[1])
-        except (ValueError, TypeError):
-            pass
-
-    # Get volume
-    volume = m.get("volumeNum") or m.get("volume24hr") or m.get("volume")
-    if volume and isinstance(volume, str):
-        try:
-            volume = float(volume)
-        except (ValueError, TypeError):
-            volume = None
-
-    # Get liquidity
-    liquidity = m.get("liquidityNum") or m.get("liquidity")
-    if liquidity and isinstance(liquidity, str):
-        try:
-            liquidity = float(liquidity)
-        except (ValueError, TypeError):
-            liquidity = None
-
-    return MarketResponse(
-        id=m.get("id", m.get("conditionId", "")),
-        condition_id=m.get("conditionId", m.get("id", "")),
-        slug=m.get("slug"),
-        question=m.get("question", ""),
-        description=m.get("description"),
-        category=m.get("category"),
-        end_date=m.get("endDate"),
-        active=m.get("active", True),
-        price_yes=price_yes,
-        price_no=price_no,
-        volume_24h=volume,
-        liquidity=liquidity,
-    )
+@router.get("/{market_id}/prices", response_model=list[PriceResponse])
+async def get_market_prices(
+    market_id: str,
+    start: Optional[datetime] = None,
+    end: Optional[datetime] = None,
+    limit: int = Query(default=100, ge=1, le=1000),
+):
+    """Get locally recorded price history for a market."""
+    try:
+        prices = await db.get_prices(market_id=market_id, start=start, end=end, limit=limit)
+        return [
+            PriceResponse(
+                timestamp=p.timestamp,
+                open=p.open,
+                high=p.high,
+                low=p.low,
+                close=p.close,
+                volume=p.volume,
+            )
+            for p in prices
+        ]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
