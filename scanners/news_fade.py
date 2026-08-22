@@ -41,6 +41,9 @@ class NewsFadeScanner(StreamScanner):
         # market_id -> deque[(ts, mid)]
         self._history: dict[str, deque] = {}
         self._window = timedelta(minutes=settings.fade_window_minutes)
+        # market_id -> (direction, locked_until): one directional thesis per
+        # market at a time — see _direction_locked
+        self._locks: dict[str, tuple[str, object]] = {}
 
     async def seed_baselines(self) -> None:
         """Seed price history from recorded bars so baselines survive restarts."""
@@ -58,6 +61,47 @@ class NewsFadeScanner(StreamScanner):
             seeded += 1
         if seeded:
             logger.info(f"news-fade seeded baselines for {seeded} markets")
+        await self.seed_locks()
+
+    async def seed_locks(self) -> None:
+        """Re-arm directional locks after a restart.
+
+        Without this a restart forgets which way each market was already faded,
+        and the opposite-side signal the lock exists to prevent slips through.
+        """
+        lock = timedelta(hours=settings.fade_direction_lock_hours)
+        now = utcnow()
+        recent = await self.db.get_signals(strategy=self.name, limit=500)
+        for sig in recent:
+            if not sig.market_id:
+                continue
+            created = from_db(sig.created_at)
+            if created is None or now - created > lock:
+                continue
+            direction = "up" if sig.side == SignalSide.BUY_NO.value else "down"
+            existing = self._locks.get(sig.market_id)
+            # get_signals is newest-first; the newest signal owns the lock
+            if existing is None:
+                self._locks[sig.market_id] = (direction, created + lock)
+        if self._locks:
+            logger.info(f"news-fade re-armed {len(self._locks)} directional locks")
+
+    def _direction_locked(self, market_id: str, direction: str) -> bool:
+        """True if this market was recently faded the OTHER way.
+
+        Fading a spike predicts a retrace; that retrace then looks like a fresh
+        spike in the opposite direction. Acting on it opens an offsetting
+        position in the same market and books a guaranteed wash minus fees.
+        Same-direction re-fires are left to the dedup key.
+        """
+        entry = self._locks.get(market_id)
+        if entry is None:
+            return False
+        locked_direction, until = entry
+        if utcnow() >= until:
+            del self._locks[market_id]
+            return False
+        return locked_direction != direction
 
     async def on_stream_event(self, event: Event) -> list[Signal]:
         data = event.data
@@ -79,7 +123,20 @@ class NewsFadeScanner(StreamScanner):
             return []
 
         candidate = self._detect(market, dq, price)
-        return [candidate] if candidate else []
+        if candidate is None:
+            return []
+        direction = candidate.snapshot["direction"]
+        if self._direction_locked(market.id, direction):
+            logger.debug(
+                f"news-fade: {market.id} locked {self._locks[market.id][0]}; "
+                f"suppressing {direction} fade"
+            )
+            return []
+        self._locks[market.id] = (
+            direction,
+            now + timedelta(hours=settings.fade_direction_lock_hours),
+        )
+        return [candidate]
 
     def _detect(self, market, dq, price: float):
         """Pure-ish spike detection over the current window."""

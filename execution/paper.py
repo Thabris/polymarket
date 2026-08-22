@@ -84,9 +84,13 @@ class PaperRouter(ExecutionRouter):
             logger.info(f"risk cap: {signal.strategy} has {open_count} open positions; skipping")
             self._skips += 1
             return
-        # one position per market+token: a re-emitted signal (dedup-key churn,
-        # price drift) must never stack a second paper position
-        if await self.db.has_open_position(signal.market_id, signal.token_id):
+        # one position per market per strategy, and never both outcomes of the
+        # same market: a re-emitted signal (dedup-key churn, price drift) must
+        # never stack a second paper position, and an opposite-side signal must
+        # never offset a live one
+        if await self.db.conflicting_open_position(
+            signal.market_id, signal.token_id, signal.strategy
+        ):
             self._skips += 1
             return
 
@@ -149,6 +153,14 @@ class PaperRouter(ExecutionRouter):
             if low <= watched_price <= high:
                 if self._pending.pop(signal_id, None) is None:
                     continue  # raced with expire_stale_pending
+                # armed-then-conflicted: another order on this market filled
+                # while this one rested, so the invariant has to hold here too
+                if await self.db.conflicting_open_position(
+                    pending["market_id"], pending["token_id"], pending["strategy"]
+                ):
+                    self._skips += 1
+                    await self._cancel_signal(signal_id, "conflicting_position")
+                    continue
                 # fill at the OBSERVED in-zone price (a level the market
                 # actually traded/quoted), never a synthetic zone midpoint
                 await self._fill(
@@ -162,6 +174,26 @@ class PaperRouter(ExecutionRouter):
                     size_hint=pending.get("size_hint"),
                     taker=False,
                 )
+
+    def pending_market_ids(self) -> set[str]:
+        """Markets with a resting zone order (PaperBook must refresh these too)."""
+        return {p["market_id"] for p in self._pending.values() if p.get("market_id")}
+
+    def pending_signal_ids(self) -> set[int]:
+        """Signal ids still armed as zone orders."""
+        return set(self._pending)
+
+    async def cancel_for_market(self, market_id: str, reason: str) -> int:
+        """Drop every resting zone order on a market and cancel its signals."""
+        cancelled = 0
+        for signal_id, pending in list(self._pending.items()):
+            if pending.get("market_id") != market_id:
+                continue
+            if self._pending.pop(signal_id, None) is None:
+                continue  # raced with a fill or an expiry
+            await self._cancel_signal(signal_id, reason)
+            cancelled += 1
+        return cancelled
 
     async def expire_stale_pending(self) -> int:
         """Expire pending zone orders past their validity (called by PaperBook)."""
@@ -224,6 +256,20 @@ class PaperRouter(ExecutionRouter):
         )
         logger.info(f"paper fill: {strategy} {side} {size:.1f}sh @ {price:.3f} (signal {signal_id})")
 
+    async def _cancel_signal(self, signal_id: int, reason: str) -> None:
+        """Cancel a signal that can no longer be acted on (distinct from expiry:
+        expiry means the entry window elapsed, cancellation means the entry
+        became impossible)."""
+        await self.db.update_signal(signal_id, status=SignalStatus.CANCELLED.value)
+        logger.info(f"signal {signal_id} cancelled: {reason}")
+        await event_bus.emit(
+            Event(
+                type=EventType.SIGNAL_UPDATED,
+                data={"id": signal_id, "status": SignalStatus.CANCELLED.value, "reason": reason},
+                source="paper_router",
+            )
+        )
+
     async def _expire_signal(self, signal_id: int) -> None:
         await self.db.update_signal(signal_id, status=SignalStatus.EXPIRED.value)
         await event_bus.emit(
@@ -257,6 +303,41 @@ class PaperRouter(ExecutionRouter):
                 source="paper_router",
             )
         )
+
+    async def void_position(self, position_id: int, reason: str = "voided_conflict") -> bool:
+        """Close a position at its own entry price, booking only the fees paid.
+
+        For positions that should never have opened: the exit is a bookkeeping
+        unwind, not a market outcome, so it must not read as a win or a loss.
+        VOID_EXIT_REASONS keeps these out of win rate and calibration.
+        """
+        positions = await self.db.get_paper_positions(status="open", limit=10000)
+        pos = next((p for p in positions if p.id == position_id), None)
+        if pos is None:
+            return False
+        await self.db.close_paper_position(
+            position_id,
+            exit_price=pos.entry_price,
+            exit_reason=reason,
+            pnl=-(pos.fees_paid or 0.0),
+        )
+        await event_bus.emit(
+            Event(
+                type=EventType.POSITION_UPDATED,
+                data={
+                    "position_id": position_id,
+                    "signal_id": pos.signal_id,
+                    "strategy": pos.strategy,
+                    "status": "closed",
+                    "exit_price": pos.entry_price,
+                    "exit_reason": reason,
+                    "pnl": -(pos.fees_paid or 0.0),
+                },
+                source="paper_router",
+            )
+        )
+        logger.info(f"voided position {position_id} ({pos.strategy} {pos.market_id}): {reason}")
+        return True
 
     def status(self) -> dict:
         return {

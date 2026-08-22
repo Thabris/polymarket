@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     fade_retrace_high: float = Field(default=0.618)
     fade_entry_validity_hours: float = Field(default=2.0)
     fade_time_stop_hours: float = Field(default=24.0)
+    # A market gets one directional fade thesis at a time: once faded, the
+    # opposite-direction fade is suppressed for this long. The retrace the
+    # first signal predicted would otherwise trip the scanner in reverse.
+    fade_direction_lock_hours: float = Field(default=24.0)
     fade_toast_pp: float = Field(default=0.15)
     fade_toast_min_liquidity: float = Field(default=100000.0)
 

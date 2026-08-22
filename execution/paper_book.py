@@ -30,6 +30,12 @@ logger = logging.getLogger(__name__)
 
 CHECK_INTERVAL_S = 600
 
+# Positions closed for bookkeeping reasons rather than by a market outcome.
+# They carry no directional information, so they are held out of win rate and
+# the calibration table; their realised cost (fees already paid) still counts
+# against P&L, because the book really did pay it.
+VOID_EXIT_REASONS = frozenset({"voided_conflict"})
+
 
 class PaperBook:
     """Resolution tracker + stats for paper positions and real fills."""
@@ -58,12 +64,17 @@ class PaperBook:
 
         open_positions = await self.db.get_paper_positions(status="open")
         open_fills = await self.db.get_real_fills(status="open")
+        open_signals = await self.db.get_signals_by_status([SignalStatus.OPEN.value])
         market_ids = {p.market_id for p in open_positions if p.market_id}
         market_ids |= await self._fill_market_ids(open_fills)
+        # an open signal's market may carry no position at all yet; without it
+        # here a market that resolves mid-entry-window is never re-checked
+        market_ids |= {s.market_id for s in open_signals if s.market_id}
         if not market_ids:
             return
 
         markets = await self._refresh_markets(market_ids)
+        await self._cancel_resolved_signals(open_signals, markets)
 
         for pos in open_positions:
             market = markets.get(pos.market_id)
@@ -148,12 +159,41 @@ class PaperBook:
         return mid
 
     async def _expire_stale_signals(self) -> None:
-        """Expire open non-zone signals past their expiry."""
+        """Expire open signals past their expiry.
+
+        Zone signals still armed in the router are skipped: expire_stale_pending
+        runs first and owns that transition, so anything still resting is inside
+        its window and must not be marked expired behind the router's back.
+        """
         now = utcnow()
+        armed = self.router.pending_signal_ids()
         for s in await self.db.get_signals_by_status([SignalStatus.OPEN.value]):
+            if s.id in armed:
+                continue
             expires = from_db(s.expires_at)
             if expires and expires < now:
                 await self.db.update_signal(s.id, status=SignalStatus.EXPIRED.value)
+
+    async def _cancel_resolved_signals(self, open_signals, markets: dict) -> None:
+        """Cancel open signals whose market has already closed.
+
+        An entry window is worthless once the market resolves — the fill can
+        never happen, but the signal would otherwise sit `open` for the rest of
+        its validity and inflate the denominator of every fill/win rate.
+        """
+        cancelled_markets: set[str] = set()
+        for s in open_signals:
+            market = markets.get(s.market_id)
+            if market is None or not market.closed:
+                continue
+            if s.market_id not in cancelled_markets:
+                # drops the resting zone order and cancels its signal
+                await self.router.cancel_for_market(s.market_id, "market_resolved")
+                cancelled_markets.add(s.market_id)
+            fresh = await self.db.get_signal(s.id)
+            if fresh is not None and fresh.status == SignalStatus.OPEN.value:
+                await self.db.update_signal(s.id, status=SignalStatus.CANCELLED.value)
+                logger.info(f"signal {s.id} cancelled: market {s.market_id} resolved")
 
     # -------------------------------------------------------------------- stats
     async def stats(self) -> dict:
@@ -174,6 +214,10 @@ class PaperBook:
             if p.status == "open":
                 entry["open_positions"] += 1
                 entry["open_notional"] += p.entry_price * p.size
+            elif p.exit_reason in VOID_EXIT_REASONS:
+                # never a win or a loss, only a cost
+                entry["voided_positions"] += 1
+                entry["total_pnl"] += p.pnl or 0.0
             else:
                 entry["closed_positions"] += 1
                 entry["total_pnl"] += p.pnl or 0.0
@@ -199,8 +243,10 @@ class PaperBook:
             closed = entry["closed_positions"]
             entry["win_rate"] = entry["wins"] / closed if closed else None
             filled = entry["by_status"].get("filled", 0) + entry["by_status"].get("resolved", 0)
-            emitted = entry["signals_emitted"]
-            entry["fill_rate"] = filled / emitted if emitted else None
+            # cancelled signals were never actionable (the market resolved inside
+            # the entry window), so they must not count against the fill rate
+            actionable = entry["signals_emitted"] - entry["by_status"].get("cancelled", 0)
+            entry["fill_rate"] = filled / actionable if actionable else None
 
         return {"strategies": strategies, "real_fills": real}
 
@@ -217,6 +263,7 @@ def _empty_stats() -> dict:
         "by_status": {},
         "open_positions": 0,
         "closed_positions": 0,
+        "voided_positions": 0,
         "open_notional": 0.0,
         "wins": 0,
         "total_pnl": 0.0,

@@ -434,19 +434,34 @@ class Database:
             result = await session.execute(query)
             return result.scalars().all()
 
-    async def has_open_position(self, market_id: Optional[str], token_id: Optional[str]) -> bool:
-        """True if an open paper position exists for this market+token."""
+    async def conflicting_open_position(
+        self, market_id: Optional[str], token_id: Optional[str], strategy: Optional[str]
+    ) -> bool:
+        """True if opening this position would conflict with one already open.
+
+        Two distinct conflicts, both of which have to be caught by market rather
+        than by market+token — buy_yes and buy_no carry DIFFERENT token ids, so a
+        token-keyed check lets a strategy hold both sides of one market at once:
+
+        - same strategy, same market, either token: one thesis per market;
+        - any strategy, same market, the opposite token: holding both outcomes
+          is a guaranteed wash minus fees, whatever the two theses were.
+        """
         if not market_id:
             return False
         async with self.session() as session:
-            query = select(PaperPositionModel.id).where(
-                PaperPositionModel.market_id == market_id,
-                PaperPositionModel.status == "open",
+            result = await session.execute(
+                select(PaperPositionModel.strategy, PaperPositionModel.token_id).where(
+                    PaperPositionModel.market_id == market_id,
+                    PaperPositionModel.status == "open",
+                )
             )
-            if token_id:
-                query = query.where(PaperPositionModel.token_id == token_id)
-            result = await session.execute(query.limit(1))
-            return result.first() is not None
+            for open_strategy, open_token in result.all():
+                if strategy is not None and open_strategy == strategy:
+                    return True
+                if token_id and open_token and open_token != token_id:
+                    return True
+        return False
 
     async def get_paper_position_by_signal(self, signal_id: int) -> Optional[PaperPositionModel]:
         """Get the paper position tied to a signal."""
