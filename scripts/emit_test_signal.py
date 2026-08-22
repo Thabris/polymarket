@@ -13,7 +13,10 @@ from pathlib import Path
 
 import httpx
 
-BASE = "http://127.0.0.1:8000"
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from config.settings import settings  # noqa: E402
+
+BASE = f"http://{settings.api_host}:{settings.api_port}"
 
 
 def pick_market() -> tuple[str, str]:
