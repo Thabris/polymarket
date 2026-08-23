@@ -88,7 +88,11 @@ class Settings(BaseSettings):
     fade_spike_pp: float = Field(default=0.12)
     fade_window_minutes: int = Field(default=30)
     fade_min_liquidity: float = Field(default=25000.0)
-    fade_excluded_categories: list[str] = Field(default=["crypto"])
+    # crypto: bot-dominated; sports: in-game spikes ARE information (someone
+    # scored) — 100% of early paper-book fade losses were live-game fades,
+    # while the strategy's actual prey (news spikes on politics/geopolitics/
+    # culture) is what remains in scope
+    fade_excluded_categories: list[str] = Field(default=["crypto", "sports"])
     fade_near_end_exclusion_hours: float = Field(default=48.0)
     fade_retrace_low: float = Field(default=0.50)
     fade_retrace_high: float = Field(default=0.618)
