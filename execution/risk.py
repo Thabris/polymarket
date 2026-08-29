@@ -56,6 +56,9 @@ class RiskEngine:
         self.db = database
         self.limits: dict[str, float] = _limit_defaults()
         self.manual_kill = False
+        # daily-loss LATCH: once tripped it stays tripped for the UTC day —
+        # a later profitable close must not silently re-open the gate
+        self._daily_kill_date: Optional[str] = None
         self._blocks = 0
         self._recent_blocks: deque = deque(maxlen=20)
 
@@ -65,19 +68,26 @@ class RiskEngine:
         for name in list(self.limits):
             raw = await self.db.get_config(CONFIG_PREFIX + name)
             if raw is not None:
+                import math
                 try:
-                    self.limits[name] = float(raw)
+                    value = float(raw)
+                    if math.isfinite(value) and value > 0:
+                        self.limits[name] = value
+                    else:
+                        logger.warning(f"non-finite risk override {name}={raw!r}; keeping default")
                 except ValueError:
                     logger.warning(f"bad risk override {name}={raw!r}; keeping default")
         raw = await self.db.get_config(CONFIG_PREFIX + "manual_kill")
         self.manual_kill = raw == "1"
+        self._daily_kill_date = await self.db.get_config(CONFIG_PREFIX + "daily_kill_date")
 
     async def set_limit(self, name: str, value: float) -> None:
         """Set and persist a limit at runtime."""
+        import math
         if name not in self.limits:
             raise KeyError(name)
-        if value <= 0:
-            raise ValueError("limits must be positive")
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("limits must be positive and finite")
         self.limits[name] = float(value)
         await self.db.set_config(CONFIG_PREFIX + name, str(float(value)))
         logger.info(f"risk limit {name} set to {value}")
@@ -96,7 +106,9 @@ class RiskEngine:
         fees, p_win} — p_win from the CURRENT market price of the held token
         (falls back to entry price when the market row is missing/stale).
         """
-        positions = await self.db.get_paper_positions(status="open", limit=1000)
+        positions = await self.db.get_paper_positions(status="open", limit=100000)
+        if len(positions) >= 100000:  # pragma: no cover — loud, never silent
+            logger.error("risk book truncated at 100000 open positions; limits under-enforced")
         market_ids = [p.market_id for p in positions if p.market_id]
         rows = await self.db.get_markets_by_ids(market_ids)
         by_id = {r.id: r for r in rows}
@@ -115,7 +127,15 @@ class RiskEngine:
                 elif row.price_yes is not None:
                     mid = row.price_yes
                 if mid is not None:
-                    p_win = mid if p.token_id == row.token_id_yes else 1.0 - mid
+                    if p.token_id and p.token_id == row.token_id_yes:
+                        p_win = mid
+                    elif p.token_id and p.token_id == row.token_id_no:
+                        p_win = 1.0 - mid
+                    elif p.side == "buy_yes":
+                        p_win = mid
+                    elif p.side == "buy_no":
+                        p_win = 1.0 - mid
+                    # token matches neither and side unknown -> entry fallback
             if p_win is None:
                 p_win = p.entry_price
             p_win = min(max(p_win, 0.0), 1.0)
@@ -134,15 +154,11 @@ class RiskEngine:
         return book
 
     async def realized_pnl_today(self) -> float:
-        """Realized P&L of paper positions closed since UTC midnight."""
+        """Realized P&L of paper positions closed since UTC midnight (SQL-side
+        filter on closed_at — a recency window keyed on opened_at was silently
+        dropping resolution closes of long-held positions)."""
         midnight = datetime.combine(utcnow().date(), time.min, tzinfo=timezone.utc)
-        closed = await self.db.get_paper_positions(status="closed", limit=500)
-        total = 0.0
-        for p in closed:
-            closed_at = from_db(p.closed_at)
-            if closed_at is not None and closed_at >= midnight and p.pnl is not None:
-                total += p.pnl
-        return total
+        return await self.db.sum_closed_pnl_since(midnight)
 
     # ---------------------------------------------------------------------- VaR
     @staticmethod
@@ -159,7 +175,7 @@ class RiskEngine:
         measured against entry (premium + sunk fees fully at risk).
         """
         sims = sims or settings.risk_var_sims
-        if not book:
+        if not book or sims <= 0:
             return {"var": 0.0, "es": 0.0, "worst_case": 0.0, "expected_pnl": 0.0}
         rng = random.Random(seed)
         groups = sorted({e["group"] for e in book})
@@ -199,8 +215,13 @@ class RiskEngine:
         if self.manual_kill:
             return self._block(strategy, market_id, "manual_kill")
 
+        today = utcnow().date().isoformat()
+        if self._daily_kill_date == today:
+            return self._block(strategy, market_id, "daily_loss_latched")
         daily = await self.realized_pnl_today()
         if daily <= -self.limits["daily_loss"]:
+            self._daily_kill_date = today
+            await self.db.set_config(CONFIG_PREFIX + "daily_kill_date", today)
             return self._block(strategy, market_id, f"daily_loss {daily:.0f}")
 
         book = await self._open_book()
@@ -287,7 +308,10 @@ class RiskEngine:
         return {
             "kill_switch": {
                 "manual": self.manual_kill,
-                "daily_loss_tripped": daily <= -self.limits["daily_loss"],
+                "daily_loss_tripped": (
+                    self._daily_kill_date == utcnow().date().isoformat()
+                    or daily <= -self.limits["daily_loss"]
+                ),
             },
             "bankroll_reference": settings.risk_bankroll,
             "deployed": {

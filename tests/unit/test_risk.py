@@ -173,3 +173,76 @@ class TestSnapshot:
         assert snap["var"]["var"] >= 0
         assert snap["open_positions"] == 1
         assert not snap["kill_switch"]["manual"]
+
+
+class TestReviewFixes:
+    @pytest.mark.asyncio
+    async def test_daily_pnl_counts_old_opened_positions(self, mem_db):
+        """The kill switch must see resolution closes of long-held positions."""
+        engine = RiskEngine(mem_db)
+        engine.limits["daily_loss"] = 50.0
+        await _seed_position(mem_db, "m1", entry=0.5, size=200)
+        positions = await mem_db.get_paper_positions(status="open")
+        # backdate opened_at far into the past, then close today at a loss
+        from sqlalchemy import update as sa_update
+        from db.models import PaperPositionModel
+        from datetime import timedelta as td
+        from core.timeutil import utcnow, to_db
+        async with mem_db.session() as session:
+            await session.execute(
+                sa_update(PaperPositionModel)
+                .where(PaperPositionModel.id == positions[0].id)
+                .values(opened_at=to_db(utcnow() - td(days=30)))
+            )
+        await mem_db.close_paper_position(positions[0].id, exit_price=0.0,
+                                          exit_reason="resolution_loss", pnl=-100.0)
+        assert await engine.realized_pnl_today() == pytest.approx(-100.0)
+        allowed, reason = await engine.allow("theta", "m2", 10.0)
+        assert not allowed and reason.startswith("daily_loss")
+
+    @pytest.mark.asyncio
+    async def test_daily_loss_latches_for_the_day(self, mem_db):
+        """A later profitable close must NOT un-trip the kill switch."""
+        engine = RiskEngine(mem_db)
+        engine.limits["daily_loss"] = 50.0
+        await _seed_position(mem_db, "m1", entry=0.5, size=200)
+        positions = await mem_db.get_paper_positions(status="open")
+        await mem_db.close_paper_position(positions[0].id, exit_price=0.0,
+                                          exit_reason="resolution_loss", pnl=-100.0)
+        allowed, _ = await engine.allow("theta", "m2", 10.0)  # trips + latches
+        assert not allowed
+        # a big win brings the day positive — the latch must hold anyway
+        await _seed_position(mem_db, "m3", entry=0.5, size=200)
+        positions = await mem_db.get_paper_positions(status="open")
+        await mem_db.close_paper_position(positions[0].id, exit_price=1.0,
+                                          exit_reason="resolution_win", pnl=+500.0)
+        allowed, reason = await engine.allow("theta", "m4", 10.0)
+        assert not allowed and reason == "daily_loss_latched"
+        # and the latch survives a restart
+        fresh = RiskEngine(mem_db)
+        await fresh.load_overrides()
+        allowed, reason = await fresh.allow("theta", "m4", 10.0)
+        assert not allowed and reason == "daily_loss_latched"
+
+    def test_mc_var_zero_sims_guard(self):
+        assert RiskEngine.mc_var([_entry()], sims=-1)["var"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_infinite_limit_rejected(self, mem_db):
+        engine = RiskEngine(mem_db)
+        with pytest.raises(ValueError):
+            await engine.set_limit("total_deployed", float("inf"))
+
+    @pytest.mark.asyncio
+    async def test_p_win_side_fallback_on_token_mismatch(self, mem_db):
+        """A stale/None token id must never invert the win probability."""
+        await _seed_position(mem_db, "m1", entry=0.9, size=100)
+        # corrupt the position's token to something matching neither side
+        from sqlalchemy import update as sa_update
+        from db.models import PaperPositionModel
+        async with mem_db.session() as session:
+            await session.execute(sa_update(PaperPositionModel).values(token_id="stale-token"))
+        engine = RiskEngine(mem_db)
+        book = await engine._open_book()
+        # side is buy_yes and market mid ~0.9 -> p_win must stay ~0.9, not 0.1
+        assert book[0]["p_win"] == pytest.approx(0.9, abs=0.02)

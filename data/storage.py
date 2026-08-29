@@ -463,6 +463,25 @@ class Database:
                     return True
         return False
 
+    async def sum_closed_pnl_since(self, cutoff: datetime) -> float:
+        """Sum realized pnl of positions CLOSED at/after the cutoff.
+
+        SQL-side filter on closed_at — the daily-loss kill switch must see
+        every close of the day, including positions opened weeks ago (the
+        normal resolution lifecycle), which a recency-by-opened_at window
+        would silently drop.
+        """
+        from sqlalchemy import func as sa_func
+        async with self.session() as session:
+            result = await session.execute(
+                select(sa_func.coalesce(sa_func.sum(PaperPositionModel.pnl), 0.0)).where(
+                    PaperPositionModel.status == "closed",
+                    PaperPositionModel.closed_at.is_not(None),
+                    PaperPositionModel.closed_at >= to_db(cutoff),
+                )
+            )
+            return float(result.scalar() or 0.0)
+
     async def get_paper_position_by_signal(self, signal_id: int) -> Optional[PaperPositionModel]:
         """Get the paper position tied to a signal."""
         async with self.session() as session:

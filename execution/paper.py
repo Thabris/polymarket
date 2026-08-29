@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Optional
 
@@ -36,6 +37,9 @@ class PaperRouter(ExecutionRouter):
         super().__init__(risk_limits)
         self.db = database
         self.risk_engine = risk_engine
+        # serializes the risk-check + insert critical section: without it two
+        # concurrent fills can both read a book excluding the other (TOCTOU)
+        self._fill_lock = asyncio.Lock()
         # signal_id -> {token_id, zone_low, zone_high, expires_at, signal}
         self._pending: dict[int, dict] = {}
         self._fills = 0
@@ -49,6 +53,8 @@ class PaperRouter(ExecutionRouter):
         for s in open_signals:
             if s.entry_zone_low is None or s.entry_zone_high is None or not s.token_id:
                 continue
+            if s.grade == "C":
+                continue  # shadows are never papered — restarts must not arm them
             expires = from_db(s.expires_at)
             if expires and expires < now:
                 await self._expire_signal(s.id)
@@ -229,16 +235,43 @@ class PaperRouter(ExecutionRouter):
     ) -> None:
         notional = size_hint or settings.paper_default_notional
         notional = min(notional, self.risk.max_position_per_market)
-        # the risk gate — every position, both fill paths, passes through here;
-        # a blocked fill cancels its signal so the book never quietly diverges
-        if self.risk_engine is not None:
-            allowed, reason = await self.risk_engine.allow(
-                strategy=strategy, market_id=market_id, notional=notional, p_win=price
+        async with self._fill_lock:
+            # per-strategy count cap re-checked HERE (not only at arming time):
+            # a zone order can fill long after arming, when the cap is full
+            open_count = len(
+                await self.db.get_paper_positions(strategy=strategy, status="open")
             )
-            if not allowed:
+            if open_count >= self.risk.max_open_positions_per_strategy:
                 self._skips += 1
-                await self._cancel_signal(signal_id, f"risk:{reason}")
+                await self._cancel_signal(signal_id, "risk:max_open_per_strategy")
                 return
+            # the risk gate — every position, both fill paths, passes through
+            # here; a blocked fill cancels its signal so the book never
+            # quietly diverges
+            if self.risk_engine is not None:
+                allowed, reason = await self.risk_engine.allow(
+                    strategy=strategy, market_id=market_id, notional=notional, p_win=price
+                )
+                if not allowed:
+                    self._skips += 1
+                    await self._cancel_signal(signal_id, f"risk:{reason}")
+                    return
+            await self._insert_and_announce(
+                signal_id, strategy, market_id, token_id, side, price, fee_rate, notional, taker
+            )
+
+    async def _insert_and_announce(
+        self,
+        signal_id: int,
+        strategy: str,
+        market_id: Optional[str],
+        token_id: Optional[str],
+        side: str,
+        price: float,
+        fee_rate: float,
+        notional: float,
+        taker: bool,
+    ) -> None:
         size = notional / price if price > 0 else 0.0
         fees = taker_fee_per_share(price, fee_rate) * size if taker else 0.0
         pos = await self.db.insert_paper_position(

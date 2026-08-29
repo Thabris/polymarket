@@ -12,7 +12,7 @@ class LimitUpdate(BaseModel):
     """Set one risk limit at runtime (persisted across restarts)."""
 
     name: str
-    value: float = Field(gt=0)
+    value: float = Field(gt=0, allow_inf_nan=False)
 
 
 class KillSwitchRequest(BaseModel):

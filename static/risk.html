@@ -100,13 +100,16 @@ const LIMIT_LABELS = {
 };
 
 async function load() {
-    const res = await fetch(`${API}/risk`);
-    if (!res.ok) {
+    let r;
+    try {
+        const res = await fetch(`${API}/risk`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        r = await res.json();
+    } catch (e) {
         document.getElementById("stats").innerHTML =
-            `<div class="empty">Risk engine unavailable — daemon not running?</div>`;
+            `<div class="empty">Risk engine unavailable — daemon not running? (${esc(e.message)})</div>`;
         return;
     }
-    const r = await res.json();
     killState = r.kill_switch.manual;
 
     const banner = document.getElementById("kill-banner");
@@ -147,12 +150,20 @@ async function load() {
             <td class="muted">${usd(c.limit)}</td></tr>`;
     }).join("") || `<tr><td colspan="3" class="empty">no open positions</td></tr>`;
 
-    document.getElementById("limit-editor").innerHTML = Object.entries(r.limits).map(([name, v]) => `
+    // never rebuild the editor while the user is typing in it — a poll
+    // mid-edit was reverting inputs and Save could persist the stale value
+    const editor = document.getElementById("limit-editor");
+    const editing = editor.contains(document.activeElement);
+    const limitsKey = JSON.stringify(r.limits);
+    if (!editing && editor.dataset.rendered !== limitsKey) {
+        editor.dataset.rendered = limitsKey;
+        editor.innerHTML = Object.entries(r.limits).map(([name, v]) => `
         <div class="limit-row">
             <label>${esc(LIMIT_LABELS[name] || name)}</label>
             <input type="number" min="1" step="50" value="${Number(v)}" data-limit="${esc(name)}">
             <button class="save-limit" data-limit="${esc(name)}">Save</button>
         </div>`).join("");
+    }
 
     const killBtn = document.getElementById("kill-toggle");
     killBtn.textContent = killState ? "Release kill switch" : "ENGAGE kill switch";
@@ -168,7 +179,7 @@ document.addEventListener("click", async (e) => {
     const save = e.target.closest(".save-limit");
     if (save) {
         const name = save.dataset.limit;
-        const input = document.querySelector(`input[data-limit="${name}"]`);
+        const input = save.closest(".limit-row").querySelector("input");
         const value = parseFloat(input.value);
         if (!(value > 0)) { alert("Limit must be positive"); return; }
         const res = await fetch(`${API}/risk/limits`, {
