@@ -46,6 +46,22 @@
     </div>
 
     <div class="card">
+        <div style="font-weight:600; margin-bottom:10px;">Real portfolio (read-only — public wallet address, never a key)</div>
+        <div class="limit-row">
+            <label>Wallet address</label>
+            <input type="text" id="wallet-input" placeholder="0x…" style="width:340px; font-family:monospace;">
+            <button id="wallet-save">Track</button>
+            <span class="muted" id="wallet-status"></span>
+        </div>
+        <div id="real-stats" class="stat-row" style="margin-top:12px;"></div>
+        <div id="real-breach"></div>
+        <table class="tbl" id="real-tbl" style="margin-top:8px;">
+            <thead><tr><th>Position</th><th>Outcome</th><th>Size</th><th>Avg → Cur</th><th>Cost</th><th>Value</th><th>P&amp;L</th></tr></thead>
+            <tbody></tbody>
+        </table>
+    </div>
+
+    <div class="card">
         <div style="font-weight:600; margin-bottom:10px;">Limits (persisted, applied immediately)</div>
         <div id="limit-editor"></div>
         <div style="margin-top:12px; display:flex; gap:10px;">
@@ -169,10 +185,55 @@ async function load() {
     killBtn.textContent = killState ? "Release kill switch" : "ENGAGE kill switch";
     killBtn.className = killState ? "primary" : "";
 
+    renderReal(r.real || { configured: false });
+
     document.getElementById("blocks").innerHTML = (r.blocks.recent || []).slice().reverse().map(b => `
         <tr><td class="muted">${esc(b.at ? b.at.slice(0, 19).replace("T", " ") : "")}</td>
         <td>${esc(b.strategy)}</td><td>${esc(b.market_id || "")}</td><td>${esc(b.reason)}</td></tr>`
     ).join("") || `<tr><td colspan="4" class="empty">no blocks yet</td></tr>`;
+}
+
+function renderReal(real) {
+    const statusEl = document.getElementById("wallet-status");
+    const statsEl = document.getElementById("real-stats");
+    const breachEl = document.getElementById("real-breach");
+    const tbody = document.querySelector("#real-tbl tbody");
+    const input = document.getElementById("wallet-input");
+    if (!real.configured) {
+        statusEl.textContent = "not tracking — paste your Polymarket profile wallet address";
+        statsEl.innerHTML = ""; breachEl.innerHTML = ""; tbody.innerHTML = "";
+        return;
+    }
+    if (document.activeElement !== input && !input.value) input.value = real.wallet;
+    statusEl.textContent = real.last_error
+        ? `fetch error: ${real.last_error}`
+        : `updated ${real.updated_at ? real.updated_at.slice(11, 19) + " UTC" : "…"}`;
+
+    const varPct = real.var.limit ? Math.round(100 * real.var.var / real.var.limit) : null;
+    statsEl.innerHTML = `
+        <div class="stat-card"><div class="label">Portfolio value</div>
+            <div class="value">${usd(real.portfolio_value)}</div></div>
+        <div class="stat-card"><div class="label">Cost basis (at risk)</div>
+            <div class="value">${usd(real.cost_basis)}</div></div>
+        <div class="stat-card"><div class="label">Unrealized P&L</div>
+            <div class="value">${money(real.unrealized_pnl)}</div></div>
+        <div class="stat-card"><div class="label">VaR 95% (worst $${Number(real.var.worst_case).toFixed(0)})</div>
+            <div class="value">${usd(real.var.var)} <span class="muted" style="font-size:0.8rem;">/ ${usd(real.var.limit)}${varPct != null ? " (" + varPct + "%)" : ""}</span></div></div>
+        <div class="stat-card"><div class="label">Positions</div>
+            <div class="value">${real.positions.length}</div></div>`;
+
+    breachEl.innerHTML = (real.breached || []).length
+        ? `<div class="kill-banner on" style="margin-top:10px;">REAL PORTFOLIO OVER LIMIT: ${real.breached.map(esc).join(", ")} — monitoring only, reduce manually</div>`
+        : "";
+
+    tbody.innerHTML = real.positions.slice(0, 25).map(p => `
+        <tr><td>${p.event_slug
+            ? `<a class="mkt-link" target="_blank" rel="noopener" href="https://polymarket.com/event/${encodeURIComponent(p.event_slug)}">${esc(p.title)}</a>`
+            : esc(p.title)}${p.redeemable ? ' <span class="chip status-resolved">redeemable</span>' : ""}</td>
+        <td>${esc(p.outcome)}</td><td>${p.size}</td>
+        <td>${Number(p.avg_price).toFixed(3)} → ${Number(p.cur_price).toFixed(3)}</td>
+        <td>${usd(p.cost)}</td><td>${usd(p.value)}</td><td>${money(p.pnl)}</td></tr>`).join("")
+        || `<tr><td colspan="7" class="empty">no open positions in this account</td></tr>`;
 }
 
 document.addEventListener("click", async (e) => {
@@ -186,6 +247,16 @@ document.addEventListener("click", async (e) => {
             method: "PUT",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ name, value }),
+        });
+        if (!res.ok) alert("Failed: " + (await res.text()));
+        load();
+    }
+    if (e.target.id === "wallet-save") {
+        const address = document.getElementById("wallet-input").value.trim();
+        const res = await fetch(`${API}/risk/wallet`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ address }),
         });
         if (!res.ok) alert("Failed: " + (await res.text()));
         load();

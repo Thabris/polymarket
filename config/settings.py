@@ -128,7 +128,13 @@ class Settings(BaseSettings):
         default=250.0, description="UTC-day realized loss kill switch"
     )
     risk_var95_limit: float = Field(default=2000.0)
-    risk_var_sims: int = Field(default=8000)
+    risk_var_sims: int = Field(default=8000, gt=0)
+
+    # Real-portfolio tracking (READ-ONLY: public wallet address, never a key)
+    polymarket_wallet_address: Optional[str] = Field(
+        default=None, description="proxy-wallet address to risk-track (public data)"
+    )
+    real_portfolio_refresh_minutes: int = Field(default=5)
 
     # WebSocket
     ws_reconnect_delay: float = Field(default=1.0)

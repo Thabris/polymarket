@@ -21,6 +21,12 @@ class KillSwitchRequest(BaseModel):
     enabled: bool
 
 
+class WalletRequest(BaseModel):
+    """Set the real-portfolio wallet address (empty string clears)."""
+
+    address: str = Field(max_length=64)
+
+
 def _engine():
     engine = runtime.get("risk")
     if engine is None:
@@ -30,8 +36,24 @@ def _engine():
 
 @router.get("")
 async def get_risk():
-    """Full risk snapshot: exposures, VaR, limits, utilization, blocks."""
-    return await _engine().snapshot()
+    """Full risk snapshot: paper exposures + real-portfolio section."""
+    snap = await _engine().snapshot()
+    real = runtime.get("real_portfolio")
+    snap["real"] = real.snapshot() if real else {"configured": False}
+    return snap
+
+
+@router.post("/wallet")
+async def set_wallet(request: WalletRequest):
+    """Track a real Polymarket account by its PUBLIC wallet address."""
+    real = runtime.get("real_portfolio")
+    if real is None:
+        raise HTTPException(status_code=503, detail="Real portfolio tracker not running")
+    try:
+        await real.set_wallet(request.address)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"success": True, "snapshot": real.snapshot()}
 
 
 @router.put("/limits")

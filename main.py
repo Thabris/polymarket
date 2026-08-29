@@ -213,6 +213,11 @@ async def run_daemon(api_only: bool) -> None:
                 await stopper()
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"shutdown step failed: {e}")
+        try:
+            from data.portfolio_client import portfolio_client
+            await portfolio_client.close()
+        except Exception:  # noqa: BLE001
+            pass
         await clob_client.close()
         await gamma_client.close()
         await event_bus.stop()

@@ -147,8 +147,15 @@ async def build_signal_stack(universe, runtime) -> list:
     from execution.risk import RiskEngine
     from notifications.desktop_notifier import ConsoleNotifier, DesktopNotifier
 
+    from data.portfolio_client import portfolio_client
+    from execution.real_portfolio import RealPortfolio
+
     risk_engine = RiskEngine(db)
     await risk_engine.load_overrides()
+    await portfolio_client.connect()
+    real_portfolio = RealPortfolio(db, risk_engine, portfolio_client)
+    await real_portfolio.load_wallet()
+    runtime.register("real_portfolio", real_portfolio)
     router = PaperRouter(db, risk_engine=risk_engine)
     await router.load_pending()
     service = SignalService(db, router)
@@ -163,7 +170,10 @@ async def build_signal_stack(universe, runtime) -> list:
     for notifier in (DesktopNotifier(), ConsoleNotifier()):
         await notifier.start()
 
-    tasks: list = [("paper_book", book.run_forever)]
+    tasks: list = [
+        ("paper_book", book.run_forever),
+        ("real_portfolio", real_portfolio.run_forever),
+    ]
 
     # Scanners attach as their modules land (Phases 3-5)
     try:
