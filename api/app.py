@@ -15,6 +15,7 @@ from api.routes import (
     families_router,
     markets_router,
     paper_router,
+    risk_router,
     scanners_router,
     settings_router,
     signals_router,
@@ -70,6 +71,7 @@ def create_app() -> FastAPI:
     app.include_router(paper_router, prefix="/api/paper", tags=["paper"])
     app.include_router(scanners_router, prefix="/api/scanners", tags=["scanners"])
     app.include_router(families_router, prefix="/api/families", tags=["families"])
+    app.include_router(risk_router, prefix="/api/risk", tags=["risk"])
     app.include_router(ws_router, tags=["websocket"])
 
     @app.get("/api/status")

@@ -112,9 +112,23 @@ class Settings(BaseSettings):
 
     # Paper trading
     paper_default_notional: float = Field(default=100.0)
+
+    # Risk overlay (env defaults; runtime overrides persist in alert_config
+    # under "risk.<name>" via PUT /api/risk/limits — the same gate the future
+    # LiveRouter will pass through before real money moves)
+    risk_bankroll: float = Field(default=10000.0, description="reference only, shown on dashboard")
+    risk_max_total_deployed: float = Field(default=6000.0)
+    risk_max_deployed_per_strategy: float = Field(default=2500.0)
+    risk_max_deployed_per_event: float = Field(
+        default=400.0, description="same-event markets resolve together — correlation cap"
+    )
     risk_max_position_per_market: float = Field(default=500.0)
     risk_max_open_per_strategy: int = Field(default=25)
-    risk_max_daily_loss: float = Field(default=250.0)
+    risk_max_daily_loss: float = Field(
+        default=250.0, description="UTC-day realized loss kill switch"
+    )
+    risk_var95_limit: float = Field(default=2000.0)
+    risk_var_sims: int = Field(default=8000)
 
     # WebSocket
     ws_reconnect_delay: float = Field(default=1.0)

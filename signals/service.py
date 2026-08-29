@@ -144,13 +144,17 @@ async def build_signal_stack(universe, runtime) -> list:
     from data.storage import db
     from execution.paper import PaperRouter
     from execution.paper_book import PaperBook
+    from execution.risk import RiskEngine
     from notifications.desktop_notifier import ConsoleNotifier, DesktopNotifier
 
-    router = PaperRouter(db)
+    risk_engine = RiskEngine(db)
+    await risk_engine.load_overrides()
+    router = PaperRouter(db, risk_engine=risk_engine)
     await router.load_pending()
     service = SignalService(db, router)
     book = PaperBook(db, gamma_client, router)
 
+    runtime.register("risk", risk_engine)
     runtime.register("signals", service)
     runtime.register("paper_router", router)
     runtime.register("paper_book", book)

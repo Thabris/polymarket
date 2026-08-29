@@ -7,6 +7,7 @@
         ["signals", "/static/signals.html", "Signals"],
         ["calendar", "/static/calendar.html", "Calendar"],
         ["paper", "/static/paper.html", "Paper Book"],
+        ["risk", "/static/risk.html", "Risk"],
         ["rankings", "/static/index.html", "Rankings"],
         ["status", "/docs", "API"],
     ];

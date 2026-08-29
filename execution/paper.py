@@ -27,9 +27,15 @@ logger = logging.getLogger(__name__)
 class PaperRouter(ExecutionRouter):
     """Paper implementation of the execution seam."""
 
-    def __init__(self, database: Database, risk_limits: RiskLimits | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        risk_limits: RiskLimits | None = None,
+        risk_engine=None,
+    ) -> None:
         super().__init__(risk_limits)
         self.db = database
+        self.risk_engine = risk_engine
         # signal_id -> {token_id, zone_low, zone_high, expires_at, signal}
         self._pending: dict[int, dict] = {}
         self._fills = 0
@@ -223,6 +229,16 @@ class PaperRouter(ExecutionRouter):
     ) -> None:
         notional = size_hint or settings.paper_default_notional
         notional = min(notional, self.risk.max_position_per_market)
+        # the risk gate — every position, both fill paths, passes through here;
+        # a blocked fill cancels its signal so the book never quietly diverges
+        if self.risk_engine is not None:
+            allowed, reason = await self.risk_engine.allow(
+                strategy=strategy, market_id=market_id, notional=notional, p_win=price
+            )
+            if not allowed:
+                self._skips += 1
+                await self._cancel_signal(signal_id, f"risk:{reason}")
+                return
         size = notional / price if price > 0 else 0.0
         fees = taker_fee_per_share(price, fee_rate) * size if taker else 0.0
         pos = await self.db.insert_paper_position(

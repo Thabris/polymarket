@@ -142,7 +142,6 @@ async def run_daemon(api_only: bool) -> None:
     from data.universe import UniverseManager
 
     runtime.register("daemon", {"api_only": api_only})
-    (BASE_DIR / "var" / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
 
     from data.clob_client import clob_client
 
@@ -175,6 +174,9 @@ async def run_daemon(api_only: bool) -> None:
     # Uvicorn as a supervised task; signal handling stays with us
     from api.app import app
     await wait_for_port(settings.api_host, settings.api_port)
+    # pid file only AFTER winning the port: an aborting instance must never
+    # clobber the live daemon's pid (restart tooling kills by this file)
+    (BASE_DIR / "var" / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
     config = uvicorn.Config(
         app,
         host=settings.api_host,

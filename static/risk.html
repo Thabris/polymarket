@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Risk — Polymarket Scanner</title>
+    <link rel="stylesheet" href="/static/assets/style.css">
+    <style>
+        .bar { height: 8px; background: #21262d; border-radius: 4px; overflow: hidden; margin-top: 6px; }
+        .bar > div { height: 100%; background: #3fb950; transition: width .3s; }
+        .bar.warn > div { background: #d29922; }
+        .bar.crit > div { background: #f85149; }
+        .limit-row { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+        .limit-row label { min-width: 190px; color: #8b949e; font-size: 0.85rem; }
+        .limit-row input { width: 110px; }
+        .kill-banner {
+            background: #3a2422; border: 1px solid #f85149; border-radius: 8px;
+            padding: 12px 16px; margin-bottom: 16px; color: #f85149; font-weight: 600;
+            display: none;
+        }
+        .kill-banner.on { display: block; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Risk</h1>
+    <div class="subtitle">
+        Deployed = premium at stake (for binaries, deployed IS the worst case). VaR₉₅ = Monte-Carlo
+        over market-implied probabilities, same-event positions comonotone. These limits gate every
+        fill — the future live router passes through the same wall.
+    </div>
+
+    <div class="kill-banner" id="kill-banner"></div>
+
+    <div id="stats" class="stat-row"></div>
+
+    <div class="card">
+        <div style="font-weight:600; margin-bottom:10px;">Deployment vs limits</div>
+        <div id="bars"></div>
+    </div>
+
+    <div class="card">
+        <div style="font-weight:600; margin-bottom:10px;">Top concentrations (event groups)</div>
+        <table class="tbl"><thead><tr><th>Group</th><th>Deployed</th><th>Event cap</th></tr></thead>
+        <tbody id="conc"></tbody></table>
+    </div>
+
+    <div class="card">
+        <div style="font-weight:600; margin-bottom:10px;">Limits (persisted, applied immediately)</div>
+        <div id="limit-editor"></div>
+        <div style="margin-top:12px; display:flex; gap:10px;">
+            <button id="kill-toggle"></button>
+            <span class="muted" style="align-self:center;">manual kill switch blocks every new fill until released</span>
+        </div>
+    </div>
+
+    <div class="card">
+        <div style="font-weight:600; margin-bottom:10px;">Recent blocks</div>
+        <table class="tbl"><thead><tr><th>When</th><th>Strategy</th><th>Market</th><th>Reason</th></tr></thead>
+        <tbody id="blocks"></tbody></table>
+    </div>
+</div>
+
+<script src="/static/assets/nav.js" data-active="risk"></script>
+<script>
+const API = "/api";
+let killState = false;
+
+function esc(s) {
+    const d = document.createElement("div");
+    d.textContent = s == null ? "" : String(s);
+    return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function money(x) {
+    if (x == null) return "—";
+    const cls = x >= 0 ? "pos" : "neg";
+    return `<span class="${cls}">${x >= 0 ? "+" : ""}$${Number(x).toFixed(2)}</span>`;
+}
+function usd(x) { return x == null ? "—" : "$" + Number(x).toFixed(0); }
+
+function bar(label, current, limit, pct) {
+    const cls = pct == null ? "" : pct >= 90 ? "crit" : pct >= 70 ? "warn" : "";
+    const width = Math.min(pct || 0, 100);
+    return `<div style="margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; font-size:0.85rem;">
+            <span>${esc(label)}</span>
+            <span class="muted">${usd(current)} / ${usd(limit)} (${pct == null ? "—" : pct + "%"})</span>
+        </div>
+        <div class="bar ${cls}"><div style="width:${width}%"></div></div>
+    </div>`;
+}
+
+const LIMIT_LABELS = {
+    total_deployed: "Total deployed",
+    per_strategy_deployed: "Per-strategy deployed",
+    per_event_deployed: "Per-event deployed (correlation)",
+    per_market_deployed: "Per-market deployed",
+    var95: "VaR 95% cap",
+    daily_loss: "Daily loss kill threshold",
+};
+
+async function load() {
+    const res = await fetch(`${API}/risk`);
+    if (!res.ok) {
+        document.getElementById("stats").innerHTML =
+            `<div class="empty">Risk engine unavailable — daemon not running?</div>`;
+        return;
+    }
+    const r = await res.json();
+    killState = r.kill_switch.manual;
+
+    const banner = document.getElementById("kill-banner");
+    if (r.kill_switch.manual || r.kill_switch.daily_loss_tripped) {
+        banner.classList.add("on");
+        banner.textContent = r.kill_switch.manual
+            ? "MANUAL KILL SWITCH ENGAGED — no new positions will open"
+            : "DAILY LOSS LIMIT TRIPPED — new positions blocked until UTC midnight";
+    } else {
+        banner.classList.remove("on");
+    }
+
+    document.getElementById("stats").innerHTML = `
+        <div class="stat-card"><div class="label">Deployed</div>
+            <div class="value">${usd(r.deployed.total.current)}</div></div>
+        <div class="stat-card"><div class="label">VaR 95% (worst $${Number(r.var.worst_case).toFixed(0)})</div>
+            <div class="value">${usd(r.var.var)}</div></div>
+        <div class="stat-card"><div class="label">Expected shortfall</div>
+            <div class="value">${usd(r.var.es)}</div></div>
+        <div class="stat-card"><div class="label">Realized today (UTC)</div>
+            <div class="value">${money(r.daily_realized_pnl)}</div></div>
+        <div class="stat-card"><div class="label">Open positions</div>
+            <div class="value">${r.open_positions}</div></div>
+        <div class="stat-card"><div class="label">Blocks</div>
+            <div class="value">${r.blocks.total}</div></div>`;
+
+    let bars = bar("Total deployed", r.deployed.total.current, r.deployed.total.limit, r.deployed.total.pct);
+    bars += bar("VaR 95%", r.var.var, r.var.limit, r.var.pct);
+    for (const [s, u] of Object.entries(r.deployed.by_strategy)) {
+        bars += bar(`${s} deployed`, u.current, u.limit, u.pct);
+    }
+    document.getElementById("bars").innerHTML = bars;
+
+    document.getElementById("conc").innerHTML = r.deployed.top_concentrations.map(c => {
+        const over = c.notional > c.limit;
+        return `<tr><td>${esc(c.group)}</td>
+            <td class="${over ? "neg" : ""}">${usd(c.notional)}</td>
+            <td class="muted">${usd(c.limit)}</td></tr>`;
+    }).join("") || `<tr><td colspan="3" class="empty">no open positions</td></tr>`;
+
+    document.getElementById("limit-editor").innerHTML = Object.entries(r.limits).map(([name, v]) => `
+        <div class="limit-row">
+            <label>${esc(LIMIT_LABELS[name] || name)}</label>
+            <input type="number" min="1" step="50" value="${Number(v)}" data-limit="${esc(name)}">
+            <button class="save-limit" data-limit="${esc(name)}">Save</button>
+        </div>`).join("");
+
+    const killBtn = document.getElementById("kill-toggle");
+    killBtn.textContent = killState ? "Release kill switch" : "ENGAGE kill switch";
+    killBtn.className = killState ? "primary" : "";
+
+    document.getElementById("blocks").innerHTML = (r.blocks.recent || []).slice().reverse().map(b => `
+        <tr><td class="muted">${esc(b.at ? b.at.slice(0, 19).replace("T", " ") : "")}</td>
+        <td>${esc(b.strategy)}</td><td>${esc(b.market_id || "")}</td><td>${esc(b.reason)}</td></tr>`
+    ).join("") || `<tr><td colspan="4" class="empty">no blocks yet</td></tr>`;
+}
+
+document.addEventListener("click", async (e) => {
+    const save = e.target.closest(".save-limit");
+    if (save) {
+        const name = save.dataset.limit;
+        const input = document.querySelector(`input[data-limit="${name}"]`);
+        const value = parseFloat(input.value);
+        if (!(value > 0)) { alert("Limit must be positive"); return; }
+        const res = await fetch(`${API}/risk/limits`, {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name, value }),
+        });
+        if (!res.ok) alert("Failed: " + (await res.text()));
+        load();
+    }
+    if (e.target.id === "kill-toggle") {
+        const engaging = !killState;
+        if (engaging && !confirm("Engage the kill switch? No new positions will open until released.")) return;
+        await fetch(`${API}/risk/kill`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ enabled: engaging }),
+        });
+        load();
+    }
+});
+
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
