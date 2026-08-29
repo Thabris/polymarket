@@ -154,6 +154,9 @@ class NewsFadeScanner(StreamScanner):
         category = market.category or category_for(market)
         if category in settings.fade_excluded_categories:
             return None
+        # shadow categories (sports): keep collecting the evidence on the
+        # dashboard, but grade C means never toasted and never papered
+        shadow = category in settings.fade_shadow_categories
         if market.end_date is not None:
             hours_left = (market.end_date - utcnow()).total_seconds() / 3600
             if hours_left < settings.fade_near_end_exclusion_hours:
@@ -202,7 +205,7 @@ class NewsFadeScanner(StreamScanner):
             market_id=market.id,
             token_id=token_id,
             side=side,
-            grade=SignalGrade.B,
+            grade=SignalGrade.C if shadow else SignalGrade.B,
             score=round(magnitude, 4),
             entry_price=round(entry_ref, 4),
             entry_zone_low=round(zone_low, 4),

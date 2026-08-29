@@ -34,9 +34,10 @@ def configure_logging() -> None:
     root = logging.getLogger()
     root.setLevel(getattr(logging, settings.log_level.upper(), logging.INFO))
     fmt = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    console = logging.StreamHandler(sys.stdout)
-    console.setFormatter(fmt)
-    root.addHandler(console)
+    if sys.stdout is not None:  # absent under pythonw (auto-start at logon)
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(fmt)
+        root.addHandler(console)
     file_handler = logging.handlers.RotatingFileHandler(
         BASE_DIR / "var" / "daemon.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
     )

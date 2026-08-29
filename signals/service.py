@@ -73,6 +73,8 @@ class SignalService:
     # ------------------------------------------------------------ notifications
     def _should_toast(self, signal: Signal) -> bool:
         """Notification policy (plan §Notification policy)."""
+        if signal.grade == SignalGrade.C:
+            return False  # shadow/flagged signals never toast, any strategy
         if signal.strategy == "manual":
             return False
         if signal.strategy == "calendar_arb":

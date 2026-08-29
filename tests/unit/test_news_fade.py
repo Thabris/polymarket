@@ -92,3 +92,20 @@ class TestSpikeDetection:
         dq.append((utcnow(), 0.63))
         s2 = scanner._detect(_market(), dq, 0.63)
         assert s1.dedup_key == s2.dedup_key  # one signal per spike window
+
+
+class TestShadowCategories:
+    def test_sports_becomes_grade_c_shadow(self):
+        # sports fades are evidence-gathering shadows: emitted, never papered
+        scanner = _scanner()
+        dq = _series([0.35] * 10 + [0.40, 0.50, 0.62])
+        signal = scanner._detect(_market(category="sports"), dq, 0.62)
+        assert signal is not None
+        assert signal.grade.value == "C"
+
+    def test_politics_stays_grade_b(self):
+        scanner = _scanner()
+        dq = _series([0.35] * 10 + [0.40, 0.50, 0.62])
+        signal = scanner._detect(_market(category="politics"), dq, 0.62)
+        assert signal is not None
+        assert signal.grade.value == "B"
