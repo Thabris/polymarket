@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -105,6 +106,32 @@ class TaskSupervisor:
             self.runtime.set_task_status(name, running=False)
 
 
+async def wait_for_port(host: str, port: int, timeout_s: float = 60.0) -> None:
+    """Wait until the API port is bindable.
+
+    A gracefully draining predecessor can hold the port for ~20s after a
+    restart; binding into that window made uvicorn sys.exit(1) and left the
+    daemon in a half-alive zombie state (Aug 23-25 incident). Retry, and if
+    the port is still taken after the timeout, abort the WHOLE daemon loudly.
+    """
+    import socket
+
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                probe.bind((host, port))
+            return
+        except OSError:
+            if asyncio.get_running_loop().time() >= deadline:
+                raise SystemExit(
+                    f"port {host}:{port} still in use after {timeout_s:.0f}s — "
+                    "is another daemon instance running?"
+                )
+            logger.warning(f"port {port} busy (draining predecessor?), retrying in 5s...")
+            await asyncio.sleep(5)
+
+
 async def run_daemon(api_only: bool) -> None:
     """Wire components and run until interrupted."""
     from core.events import event_bus
@@ -114,6 +141,7 @@ async def run_daemon(api_only: bool) -> None:
     from data.universe import UniverseManager
 
     runtime.register("daemon", {"api_only": api_only})
+    (BASE_DIR / "var" / "daemon.pid").write_text(str(os.getpid()), encoding="utf-8")
 
     from data.clob_client import clob_client
 
@@ -145,6 +173,7 @@ async def run_daemon(api_only: bool) -> None:
 
     # Uvicorn as a supervised task; signal handling stays with us
     from api.app import app
+    await wait_for_port(settings.api_host, settings.api_port)
     config = uvicorn.Config(
         app,
         host=settings.api_host,
@@ -158,6 +187,9 @@ async def run_daemon(api_only: bool) -> None:
     logger.info(f"API at http://{settings.api_host}:{settings.api_port} — Ctrl+C to stop")
 
     stop = asyncio.Event()
+    # A daemon without its API is a zombie: if the api task ever finishes on
+    # its own (bind failure, crash), take the whole daemon down cleanly.
+    api_task.add_done_callback(lambda _t: stop.set())
     try:
         await stop.wait()
     except asyncio.CancelledError:
